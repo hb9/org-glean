@@ -61,7 +61,9 @@ An empty INCLUDES list accepts every .org file."
 (defvar org-glean--last-search-completeness 'complete)
 (defvar org-glean--last-search-examined 0)
 (defvar org-glean--last-search-used nil)
+(defvar org-glean--last-search-provider-errors nil)
 (defvar org-glean--provider-stale-seen nil)
+(defvar org-glean--provider-work-count 0)
 
 (defvar org-glean--database nil)
 (defvar org-glean--database-path nil)
@@ -584,6 +586,7 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
         (setq examined (+ examined (length rows))
               offset (+ offset (length rows))
               done (< (length rows) size))
+        (cl-incf org-glean--provider-work-count (length rows))
         (dolist (item rows)
           (when (or (not (file-exists-p (alist-get :path item)))
                     (not (equal (alist-get :digest item)
@@ -626,6 +629,7 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
         (setq examined (+ examined (length rows))
               offset (+ offset (length rows))
               done (< (length rows) size))
+        (cl-incf org-glean--provider-work-count (length rows))
         (dolist (item rows)
           (when (or (not (file-exists-p (alist-get :path item)))
                     (not (equal (alist-get :digest item)
@@ -674,37 +678,50 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
          (seen (make-hash-table :test #'equal))
          (org-glean--provider-stale-seen nil)
          (used nil)
+         (provider-errors nil)
          exact lexical fuzzy-results
          (extra nil) (incomplete nil))
     (when (and (stringp query) (not (string-empty-p query)))
-      (push 'exact used)
-      (let ((page (org-glean--collect-provider
-                   db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
-                   (vector query) filters (1+ limit) remaining page-size seen)))
-        (setq exact (nth 0 page) remaining (- remaining (nth 1 page))
-              incomplete (nth 2 page) extra (nth 3 page))))
+      (let ((org-glean--provider-work-count 0))
+        (condition-case err
+            (progn
+              (let ((page (org-glean--collect-provider
+                           db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
+                           (vector query) filters (1+ limit) remaining page-size seen)))
+                (setq exact (nth 0 page) remaining (- remaining (nth 1 page))
+                      incomplete (nth 2 page) extra (nth 3 page)))
+              (push 'exact used))
+          (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
+                  (push (cons 'exact (error-message-string err)) provider-errors)))))
     (when (and (not extra) (not incomplete) (> remaining 0))
       (let ((fts (org-glean--fts-pattern query)))
         (when fts
-          (push 'lexical used)
-          (let ((page (condition-case nil
-                          (org-glean--collect-provider
-                           db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
-                           (vector fts) filters (1+ (- limit (length exact)))
-                           remaining page-size seen)
-                        (error nil))))
-            (when page
-              (setq lexical (nth 0 page) remaining (- remaining (nth 1 page))
-                    incomplete (nth 2 page) extra (nth 3 page))))))
+          (let ((org-glean--provider-work-count 0))
+            (condition-case err
+                (progn
+                  (let ((page (org-glean--collect-provider
+                               db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
+                               (vector fts) filters (1+ (- limit (length exact)))
+                               remaining page-size seen)))
+                    (setq lexical (nth 0 page) remaining (- remaining (nth 1 page))
+                          incomplete (nth 2 page) extra (nth 3 page)))
+                  (push 'lexical used))
+              (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
+                      (push (cons 'lexical (error-message-string err)) provider-errors)))))))
     (when (and fuzzy (stringp query) (not (string-empty-p (string-trim query)))
                (not extra) (not incomplete) (> remaining 0)
                (< (+ (length exact) (length lexical)) (1+ limit)))
-      (push 'fuzzy used)
-      (let ((page (org-glean--collect-fuzzy
-                   db query filters (1+ (- limit (length exact) (length lexical)))
-                   remaining page-size seen)))
-        (setq fuzzy-results (nth 0 page) remaining (- remaining (nth 1 page))
-              incomplete (nth 2 page) extra (nth 3 page))))
+      (let ((org-glean--provider-work-count 0))
+        (condition-case err
+            (progn
+              (let ((page (org-glean--collect-fuzzy
+                           db query filters (1+ (- limit (length exact) (length lexical)))
+                           remaining page-size seen)))
+                (setq fuzzy-results (nth 0 page) remaining (- remaining (nth 1 page))
+                      incomplete (nth 2 page) extra (nth 3 page)))
+              (push 'fuzzy used))
+          (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
+                  (push (cons 'fuzzy (error-message-string err)) provider-errors)))))
       (let* ((all (append (mapcar (lambda (item) (org-glean--mark-result item 'exact 0)) exact)
                         (cl-loop for item in lexical for rank from 0
                                  collect (org-glean--mark-result item 'lexical rank))
@@ -712,15 +729,18 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
                                 fuzzy-results)))
            (has-extra (> (length all) limit))
            (all (cl-subseq all 0 (min (length all) (1+ limit))))
-           (truncated (or extra incomplete has-extra))
+           (truncated (or extra incomplete provider-errors has-extra))
            (stale (or org-glean--provider-stale-seen
                       (cl-some (lambda (item) (not (alist-get :source-current item))) all)))
            (results (cl-subseq all 0 (min limit (length all)))))
        (setq org-glean--last-search-completeness
-            (cond ((or extra has-extra) 'truncated) (incomplete 'incomplete) (t 'complete))
-             org-glean--last-search-used (nreverse used))
+             (cond ((or incomplete provider-errors) 'incomplete)
+                   ((or extra has-extra) 'truncated)
+                   (t 'complete))
+             org-glean--last-search-used (nreverse used)
+             org-glean--last-search-provider-errors (nreverse provider-errors))
       (setq org-glean--last-search-examined (- budget remaining))
-       (list results truncated stale)))))
+       (list results truncated stale))))
 
 (defun org-glean-search-api (query &optional limit fuzzy filters)
   "Return a versioned, bounded result-set for QUERY.
@@ -761,14 +781,21 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
       (requested . ((lexical . t) (fuzzy . ,(if fuzzy t :false))
                     (filters . ,(if filters t :false))))
        (used . ,org-glean--last-search-used)
-       (degraded . ,(if (eq completeness 'incomplete) 'incomplete :false))
+        (degraded . ,(cond (org-glean--last-search-provider-errors 'provider-error)
+                           ((eq completeness 'incomplete) 'incomplete)
+                           (t :false)))
        (freshness . ,freshness)
        (limit . ,limit)
        (candidate-count . ,(length results))
-       (completeness . ,completeness)
-       (truncated . ,(if truncated t :false))
-       (work-examined . ,org-glean--last-search-examined)
-       (results . ,(vconcat results)))))
+        (completeness . ,completeness)
+        (truncated . ,(if truncated t :false))
+        (work-examined . ,org-glean--last-search-examined)
+        (provider-errors . ,(vconcat
+                             (mapcar (lambda (failure)
+                                       `((provider . ,(car failure))
+                                         (message . ,(cdr failure))))
+                                     org-glean--last-search-provider-errors)))
+        (results . ,(vconcat results)))))
 
 (defun org-glean--refresh-result (result)
   "Resolve stable RESULT by ID and recheck its database/source snapshot."

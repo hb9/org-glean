@@ -327,6 +327,47 @@
     (let ((results (org-glean-search "[" 10 t)))
       (should (<= (length results) 10)))))
 
+(ert-deftest org-glean-test-lexical-provider-failure-is-explicit ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root)
+                           "* Fallback subject\nlexicalfailureprobe\n")
+    (org-glean-reconcile)
+    (let ((real-select (symbol-function 'sqlite-select)))
+      (cl-letf (((symbol-function 'sqlite-select)
+                 (lambda (db sql &optional values)
+                   (if (string-match-p "target_fts MATCH" sql)
+                       (error "injected FTS provider failure")
+                     (funcall real-select db sql values)))))
+        (let ((response (org-glean-search-api "lexicalfailureprobe" 5 nil)))
+          (should (= 0 (alist-get 'candidate-count response)))
+          (should (equal '(exact) (alist-get 'used response)))
+          (should (eq 'incomplete (alist-get 'completeness response)))
+          (should (eq t (alist-get 'truncated response)))
+          (should (eq 'provider-error (alist-get 'degraded response)))
+          (should (= 1 (length (alist-get 'provider-errors response))))
+          (should (eq 'lexical
+                      (alist-get 'provider
+                                 (aref (alist-get 'provider-errors response) 0)))))))))
+
+(ert-deftest org-glean-test-fuzzy-provider-runs-after-lexical-failure ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root)
+                           "* Knowledge Graph\nbody\n")
+    (org-glean-reconcile)
+    (let ((real-select (symbol-function 'sqlite-select)))
+      (cl-letf (((symbol-function 'sqlite-select)
+                 (lambda (db sql &optional values)
+                   (if (string-match-p "target_fts MATCH" sql)
+                       (error "injected FTS provider failure")
+                     (funcall real-select db sql values)))))
+        (let* ((response (org-glean-search-api "Knowlege Grahp" 5 t))
+               (results (alist-get 'results response)))
+          (should (= 1 (length results)))
+          (should (eq 'fuzzy (alist-get :match-type (aref results 0))))
+          (should (equal '(exact fuzzy) (alist-get 'used response)))
+          (should (eq 'incomplete (alist-get 'completeness response)))
+          (should (eq 'provider-error (alist-get 'degraded response))))))))
+
 (ert-deftest org-glean-test-save-hook-updates-one-file ()
   (org-glean-test--corpus
     (let ((path (expand-file-name "note.org" root)))

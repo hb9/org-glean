@@ -13,11 +13,12 @@ new frontends should use the structured search API.
   provisional location; callers must resolve it against the current source
   snapshot before navigation.
 - Search limits are clamped to `1..100`. Candidate work is bounded separately.
-- Search completeness has exactly three values: `complete` (the applicable
-  candidate sets were exhausted or an additional eligible hit proves the
-  caller limit was reached), `truncated` (more eligible results exist than the
-  caller limit), and `incomplete` (a work budget prevented determining whether
-  more eligible results exist). `incomplete` is never an empty definitive miss.
+- Search completeness has exactly three values: `complete` (all requested
+  providers that were applicable completed and their candidate sets were
+  exhausted), `truncated` (an additional eligible result proves there are more
+  than the caller limit), and `incomplete` (a work budget or provider failure
+  prevented determining completeness). An incomplete result is never a
+  definitive miss.
 - Errors are signalled as Emacs conditions to Lisp callers. The MCP adapter
   translates them to its versioned JSON error object.
 
@@ -113,18 +114,23 @@ The structured search API returns an alist with these fields:
 | `schema-version` | Result-set schema; currently `1`. |
 | `query` | Original query string. |
 | `requested` | Modes and whether generic filters were requested. |
-| `used` | Providers actually attempted by the API. |
-| `degraded` | `incomplete` when work was exhausted before completeness could be determined; otherwise `:false`. |
+| `used` | Providers completed successfully; failed providers are listed separately. |
+| `degraded` | `:false`, `incomplete` for exhausted work budget, or `provider-error` when one or more requested providers failed. |
 | `freshness` | `stale-source-present`, `index-checked`, or `sources-checked-current`. |
 | `limit` | Clamped caller-visible result limit. |
 | `candidate-count` | Number of returned candidates, at most `limit`. |
 | `completeness` | `complete`, `truncated`, or `incomplete`. |
 | `truncated` | True for `truncated` and `incomplete`; false only for `complete`. |
 | `work-examined` | Number of provider candidates examined under the request budget. |
+| `provider-errors` | Vector of objects with `provider` and `message`; empty when no provider failed. |
 | `results` | Vector of typed result plists. |
 
 Freshness and completeness are independent. A result set can be complete but
-contain a stale source, or incomplete with no returned candidates.
+contain a stale source, or incomplete with no returned candidates. Failed
+providers are omitted from `used`, listed in `provider-errors`, and force
+`completeness` to `incomplete` even if another provider returned candidates.
+When a provider fails, applicable secondary providers are still attempted if
+the remaining work budget permits.
 
 ### Status and error
 
