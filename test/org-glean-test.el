@@ -484,5 +484,41 @@
       (should (eq 'truncated (alist-get 'completeness response)))
       (should (eq :false (alist-get 'degraded response))))))
 
+(ert-deftest org-glean-test-search-api-reports-used-modes-and-work ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "api.org" root)
+                           "* API contract\napiworkneedle\n")
+    (org-glean-reconcile)
+    (let ((response (org-glean-search-api "apiworkneedle" 5 nil)))
+      (should (= 1 (alist-get 'schema-version response)))
+      (should (equal '(exact lexical) (alist-get 'used response)))
+      (should (eq 'complete (alist-get 'completeness response)))
+      (should (= 1 (alist-get 'work-examined response)))
+      (should (= 1 (alist-get 'candidate-count response)))))
+  )
+
+(ert-deftest org-glean-test-explicit-empty-allowed-roots-fail-closed ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root)
+                           "* Private heading\nprivateprobe\n")
+    (org-glean-reconcile)
+    (let ((response (org-glean-search-api "privateprobe" 5 nil
+                                          '(:allowed-roots nil))))
+      (should (= 0 (alist-get 'candidate-count response)))
+      (should (eq 'complete (alist-get 'completeness response))))))
+
+(ert-deftest org-glean-test-exactly-one-over-limit-candidate-is-truncated ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "a.org" root)
+                           "* Shared title\nlimitprobe\n")
+    (org-glean-test--write (expand-file-name "b.org" root)
+                           "* Shared title\nlimitprobe\n")
+    (org-glean-reconcile)
+    (let ((response (org-glean-search-api "limitprobe" 1)))
+      (should (= 1 (alist-get 'candidate-count response)))
+      (should (eq t (alist-get 'truncated response)))
+      (should (eq 'truncated (alist-get 'completeness response)))))
+  )
+
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

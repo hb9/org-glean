@@ -2,7 +2,8 @@
 
 ## Short term
 
-1. Manual, transactional recursive reconciliation of configured Org roots.
+1. Manual, transactional recursive reconciliation of configured Org roots;
+   versioned public API values and search semantics are specified in `API.md`.
 2. `org-element` file and heading projections, including ID-less headings.
 3. SQLite exact/FTS search and a completion picker with safe navigation.
 4. Save-triggered updates, initial/startup and configurable periodic full-tree

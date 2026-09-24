@@ -5,7 +5,8 @@ the index is derived from Org and can be rebuilt. Requires Emacs 29+ compiled
 with SQLite FTS5 support. This project is under active development; no release
 has been cut.
 
-See [DESIGN.md](DESIGN.md) for the component contract and [ROADMAP.md](ROADMAP.md)
+See [DESIGN.md](DESIGN.md) for the first-slice design, [API.md](API.md) for the
+versioned application API contract, and [ROADMAP.md](ROADMAP.md)
 for first-release and intermediate goals. The originating design is the E2
 Org Glean note in `hb9/org-knowledge` (Denote ID `20260923T130815`).
 
@@ -40,7 +41,9 @@ With `rhblind/emacs-mcp-server` installed, load `org-glean-mcp.el` to register
 the read-only `org-glean_search` tool. Set `org-glean-mcp-allowed-roots` to the
 caller-approved roots before exposing it to an agent. Results include a
 versioned result set, freshness state, provisional/stable target identity,
-match reason, score and margin.
+match reason, score and margin. Completeness is `complete`, `truncated`, or
+`incomplete`; callers must not treat an incomplete empty result as a definitive
+miss.
 
 Run synthetic-fixture tests with:
 

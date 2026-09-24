@@ -60,6 +60,7 @@ An empty INCLUDES list accepts every .org file."
 
 (defvar org-glean--last-search-completeness 'complete)
 (defvar org-glean--last-search-examined 0)
+(defvar org-glean--last-search-used nil)
 (defvar org-glean--provider-stale-seen nil)
 
 (defvar org-glean--database nil)
@@ -565,8 +566,11 @@ When FUZZY is non-nil, add bounded fuzzy candidates."
 
 (defun org-glean--eligible-p (item filters)
   "Return non-nil when ITEM passes FILTERS, including allowed-root scope."
-  (and (not (org-glean--filtered-out-p item filters))
-       (org-glean--in-roots-p item (plist-get filters :allowed-roots))))
+  (let ((roots-specified (plist-member filters :allowed-roots))
+        (roots (plist-get filters :allowed-roots)))
+    (and (not (org-glean--filtered-out-p item filters))
+         (or (not roots-specified)
+             (and roots (org-glean--in-roots-p item roots))))))
 
 (defun org-glean--collect-provider (db sql params filters limit budget page-size seen)
   "Read provider candidates in pages, filtering before filling LIMIT.
@@ -669,9 +673,11 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
          (remaining budget)
          (seen (make-hash-table :test #'equal))
          (org-glean--provider-stale-seen nil)
+         (used nil)
          exact lexical fuzzy-results
          (extra nil) (incomplete nil))
     (when (and (stringp query) (not (string-empty-p query)))
+      (push 'exact used)
       (let ((page (org-glean--collect-provider
                    db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
                    (vector query) filters (1+ limit) remaining page-size seen)))
@@ -680,6 +686,7 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
     (when (and (not extra) (not incomplete) (> remaining 0))
       (let ((fts (org-glean--fts-pattern query)))
         (when fts
+          (push 'lexical used)
           (let ((page (condition-case nil
                           (org-glean--collect-provider
                            db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
@@ -689,11 +696,10 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
             (when page
               (setq lexical (nth 0 page) remaining (- remaining (nth 1 page))
                     incomplete (nth 2 page) extra (nth 3 page))))))
-    (setq exact (cl-subseq exact 0 (min (length exact) limit)))
-    (setq lexical (cl-subseq lexical 0 (min (length lexical) limit)))
     (when (and fuzzy (stringp query) (not (string-empty-p (string-trim query)))
                (not extra) (not incomplete) (> remaining 0)
                (< (+ (length exact) (length lexical)) (1+ limit)))
+      (push 'fuzzy used)
       (let ((page (org-glean--collect-fuzzy
                    db query filters (1+ (- limit (length exact) (length lexical)))
                    remaining page-size seen)))
@@ -711,7 +717,8 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
                       (cl-some (lambda (item) (not (alist-get :source-current item))) all)))
            (results (cl-subseq all 0 (min limit (length all)))))
        (setq org-glean--last-search-completeness
-            (cond (incomplete 'incomplete) ((or extra has-extra) 'truncated) (t 'complete)))
+            (cond ((or extra has-extra) 'truncated) (incomplete 'incomplete) (t 'complete))
+             org-glean--last-search-used (nreverse used))
       (setq org-glean--last-search-examined (- budget remaining))
        (list results truncated stale)))))
 
@@ -753,7 +760,7 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
       (query . ,query)
       (requested . ((lexical . t) (fuzzy . ,(if fuzzy t :false))
                     (filters . ,(if filters t :false))))
-      (used . ,(if fuzzy '(exact lexical fuzzy) '(exact lexical)))
+       (used . ,org-glean--last-search-used)
        (degraded . ,(if (eq completeness 'incomplete) 'incomplete :false))
        (freshness . ,freshness)
        (limit . ,limit)
