@@ -5,11 +5,13 @@
 1. Manual, transactional recursive reconciliation of configured Org roots.
 2. `org-element` file and heading projections, including ID-less headings.
 3. SQLite exact/FTS search and a completion picker with safe navigation.
-4. The first manual-reconciliation/search/picker slice is implemented and
-   verified against temporary synthetic fixtures.
-5. Save-triggered updates and configurable periodic full-tree reconciliation
-   (initial proposal: 600 seconds).
-6. Bounded fuzzy heading/title candidates and an exploration side buffer.
+4. Save-triggered updates, initial/startup and configurable periodic full-tree
+   reconciliation (600-second default), bounded fuzzy results and exploration
+   side buffer are implemented and verified against temporary fixtures.
+5. Thin, bounded MCP search adapter is implemented for the current Emacs MCP
+   registry as `org-glean_search`; Doom integration is configured separately.
+6. Compare Org Glean candidates against `orgk --for-capture`; preserve the
+   semantic fallback until a semantic provider is integrated and validated.
 
 ## Mid term
 

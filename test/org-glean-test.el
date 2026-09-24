@@ -5,6 +5,15 @@
 (require 'cl-lib)
 (require 'org-glean)
 
+;; Keep the package tests runnable without installing the optional MCP server.
+(unless (require 'mcp-server-tools nil t)
+  (cl-defstruct mcp-server-tool name title description input-schema function annotations)
+  (defvar mcp-server-tools--registry (make-hash-table :test #'equal))
+  (defun mcp-server-register-tool (tool)
+    (puthash (mcp-server-tool-name tool) tool mcp-server-tools--registry))
+  (provide 'mcp-server-tools))
+(require 'org-glean-mcp)
+
 (defmacro org-glean-test--corpus (&rest body)
   "Run BODY in an isolated temporary corpus and database."
   (declare (indent 0))
@@ -55,6 +64,31 @@
     (org-glean-reconcile)
     (should (equal "scheduled-id"
                    (alist-get :org-id (car (org-glean-search-exact "Heading")))))))
+
+(ert-deftest org-glean-test-properties-inherit-from-ancestor-headings ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "* Project\n:PROPERTIES:\n:PROJECT: blue\n:END:\n** Child\nbodyterm\n")
+    (org-glean-reconcile)
+    (let* ((response (org-glean-search-api "bodyterm" 10 nil
+                                           '(:property-equals (("PROJECT" . "blue")))))
+           (results (alist-get 'results response)))
+      (should (= 1 (length results)))
+      (should (equal '((PROJECT . "blue")) (alist-get :properties (aref results 0)))))))
+
+(ert-deftest org-glean-test-nearest-property-override-and-generic-filter ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "* Project\n:PROPERTIES:\n:PROJECT: blue\n:END:\n** Child\n:PROPERTIES:\n:PROJECT: red\n:END:\nneedleterm\n")
+    (org-glean-reconcile)
+    (let ((red (org-glean-search-api "needleterm" 10 nil
+                                     '(:property-equals (("PROJECT" . "red")))))
+          (blue (org-glean-search-api "needleterm" 10 nil
+                                      '(:property-equals (("PROJECT" . "blue"))))))
+      (should (= 1 (alist-get 'candidate-count red)))
+      (should (= 0 (alist-get 'candidate-count blue))))))
 
 (ert-deftest org-glean-test-failed-replacement-preserves-previous ()
   (org-glean-test--corpus
@@ -148,8 +182,87 @@
       (org-glean-test--write path "* Keep\nsearchable\n")
       (org-glean-reconcile)
       (let ((org-glean-roots nil))
-        (should-error (org-glean-reconcile) :type 'user-error))
+        (should (plist-get (org-glean-reconcile) :scan-error)))
       (should (org-glean-search "searchable")))))
+
+(ert-deftest org-glean-test-transient-invalid-root-does-not-remove-sources ()
+  (org-glean-test--corpus
+    (let* ((path (expand-file-name "note.org" root))
+           (original-roots org-glean-roots))
+      (org-glean-test--write path "* Keep\npersistentterm\n")
+      (org-glean-reconcile)
+      (let ((org-glean-roots '(("broken" "/no/such/org-root" nil nil))))
+        (should (plist-get (org-glean-reconcile) :scan-error)))
+      (let ((org-glean-roots original-roots))
+        (should (= 1 (length (org-glean-search "persistentterm"))))))))
+
+(ert-deftest org-glean-test-invalid-fts-query-does-not-disable-fuzzy-search ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root) "* SQLite transactions\nbody\n")
+    (org-glean-reconcile)
+    (let ((results (org-glean-search "[" 10 t)))
+      (should (<= (length results) 10)))))
+
+(ert-deftest org-glean-test-save-hook-updates-one-file ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "note.org" root)))
+      (org-glean-test--write path "#+PROPERTY: CAPTURE_POLICY none\n#+PROPERTY: PROJECT red\n* Heading\noldterm\n")
+      (org-glean-reconcile)
+      (org-glean-test--write path "#+PROPERTY: CAPTURE_POLICY eligible\n#+PROPERTY: PROJECT blue\n* Heading\nnewterm\n")
+      (with-temp-buffer
+        (setq buffer-file-name path)
+        (org-mode)
+        (org-glean--after-save))
+      (should (equal (list path) org-glean--pending-files))
+      (org-glean--flush-saved-files)
+      (should-not (org-glean-search "oldterm"))
+      (let* ((response (org-glean-search-api "newterm" 10 nil
+                                             '(:property-equals (("PROJECT" . "blue")))))
+             (results (alist-get 'results response)))
+        (should (= 1 (length results)))
+        (should (eq 'sources-checked-current (alist-get 'freshness response)))
+        (should (equal "eligible" (alist-get :capture-policy (aref results 0))))
+        (let ((none (org-glean-search-api "newterm" 10 nil
+                                          '(:property-equals (("PROJECT" . "red"))))))
+          (should (= 0 (alist-get 'candidate-count none))))))))
+
+(ert-deftest org-glean-test-fuzzy-search-is-bounded-and-typed ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root) "* Knowledge Graph\nbody\n")
+    (org-glean-reconcile)
+    (let* ((response (org-glean-search-api "Knowlege Grahp" 10 t))
+           (results (alist-get 'results response)))
+      (should (= 1 (length results)))
+      (should (eq 'fuzzy (alist-get :match-type (aref results 0)))))))
+
+(ert-deftest org-glean-test-mcp-adapter-bounds-root-and-serializes-json ()
+  (org-glean-test--corpus
+    (let* ((path (expand-file-name "note.org" root))
+           (org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write path "* Heading\nneedle\n")
+      (org-glean-reconcile)
+      (let* ((json (org-glean-mcp--handler '((query . "needle") (limit . 2))))
+             (decoded (json-parse-string json :object-type 'alist)))
+        (should (equal "sources-checked-current" (alist-get 'freshness decoded)))
+        (should (= 1 (length (alist-get 'results decoded))))
+        (should (equal "heading" (alist-get 'kind (aref (alist-get 'results decoded) 0))))))))
+
+(ert-deftest org-glean-test-mcp-handler-fails-closed-with-no-roots ()
+  (let ((org-glean-roots nil)
+        (org-glean-mcp-allowed-roots nil))
+    (should (string-match-p "No Org Glean root is allowed"
+                            (org-glean-mcp--handler '((query . "secret")))))))
+
+(ert-deftest org-glean-test-filters-do-not-hide-stale-source-state ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "note.org" root)))
+      (org-glean-test--write path "* Hidden\nstaleterm\n")
+      (org-glean-reconcile)
+      (org-glean-test--write path "* Changed\nnewbody\n")
+      (let ((response (org-glean-search-api "staleterm" 10 nil
+                                            '(:exclude-titles ("Hidden")))))
+        (should (= 0 (alist-get 'candidate-count response)))
+        (should (eq 'stale-source-present (alist-get 'freshness response)))))))
 
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

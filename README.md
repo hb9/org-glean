@@ -20,6 +20,7 @@ Licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
       '(("notes" "~/org/notes" nil ("/archive/"))))
 (org-glean-reconcile) ; manual first build and recovery
 (org-glean-find "sqlite transaction")
+(org-glean-search-buffer "sqlite transaction")
 ```
 
 The root tuple is `(NAME DIRECTORY INCLUDE-REGEXPS EXCLUDE-REGEXPS)`; patterns
@@ -29,6 +30,17 @@ defaults to `org-glean.sqlite` under `user-emacs-directory`; set
 return at most 100 typed results. Existing Org IDs enable move-stable lookup;
 ID-less targets are snapshot-scoped and navigation rechecks the source before
 opening it.
+
+`org-glean-start` enables coalesced saved-file updates and the configurable
+600-second authoritative reconciliation timer. `org-glean-stop` disables both.
+In an interactive Emacs with roots configured, the package starts these hooks
+and queues an initial reconciliation at startup.
+
+With `rhblind/emacs-mcp-server` installed, load `org-glean-mcp.el` to register
+the read-only `org-glean_search` tool. Set `org-glean-mcp-allowed-roots` to the
+caller-approved roots before exposing it to an agent. Results include a
+versioned result set, freshness state, provisional/stable target identity,
+match reason, score and margin.
 
 Run synthetic-fixture tests with:
 

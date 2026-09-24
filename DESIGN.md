@@ -15,8 +15,15 @@ SQLite/FTS5 is the first runtime; capability failure is explicit.
    replaces, skips or removes whole sources transactionally. A parse failure
    leaves the previous indexed version intact.
 4. A SQLite/FTS5 writer owns the first materialization. Exact and FTS queries
-   return bounded, typed results. A completion picker navigates after checking
-   that the source snapshot still matches the index.
+   return bounded, typed results; optional fuzzy title/heading matching draws
+   from a bounded candidate pool. A completion picker and exploration side
+   buffer navigate only after checking that the source snapshot still matches.
+5. Save hooks enqueue debounced per-file refreshes. A configurable idle timer
+   (initially 600 seconds) runs authoritative full-tree reconciliation; an
+   initial asynchronous startup run populates/reconciles the index.
+6. A separate MCP adapter exposes the generic result-set through the installed
+   Emacs MCP tool registry as `org-glean_search`. It applies an explicit
+   allowed-root fence and has no write or arbitrary-evaluation capability.
 
 These interfaces are logical ports so watchers, writers, and search engines can
 be changed independently. The first implementation may share one Lisp file.
@@ -34,6 +41,9 @@ own separately edited settings.
 - A saved file can be searched by exact heading/title and FTS body terms.
 - Bounded results identify source, heading, stability and navigation hint.
 - The picker does not silently open an ambiguous/stale provisional heading.
+- Save update refreshes only the selected source; startup/periodic reconciles
+  catch external edits, renames and deletes.
+- MCP JSON output is bounded, source-freshness-labelled and root-confined.
 
 No semantic model, fuzzy ranking, structural graph or CLI is in this slice.
 Those capabilities remain separate provider/front-end decisions.
