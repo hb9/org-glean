@@ -163,7 +163,131 @@
           (org-glean-visit result)
           (should (equal (file-truename new-path) (file-truename buffer-file-name)))
           (should (org-at-heading-p))
-          (should (equal "move-me" (org-entry-get nil "ID"))))))))
+           (should (equal "move-me" (org-entry-get nil "ID"))))))))
+
+(ert-deftest org-glean-test-preview-keeps-results-window-selected ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "preview.org" root)
+                           "* Preview heading\npreviewterm\n")
+    (org-glean-reconcile)
+    (let* ((item (car (org-glean-search "previewterm")))
+           (results (get-buffer-create "*Org Glean Preview Test*"))
+           (origin-window (selected-window)))
+      (unwind-protect
+          (progn
+            (switch-to-buffer results)
+            (org-glean-open-result item t)
+            (should (eq results (window-buffer origin-window)))
+            (let ((preview-window (get-buffer-window
+                                   (get-file-buffer (alist-get :path item)))))
+              (should (window-live-p preview-window))
+              (should (not (eq preview-window origin-window)))
+              (with-current-buffer (window-buffer preview-window)
+                (should (org-at-heading-p)))))
+        (when (buffer-live-p results) (kill-buffer results))
+        (let ((source (get-file-buffer (expand-file-name "preview.org" root))))
+          (when (buffer-live-p source) (kill-buffer source)))))))
+
+(ert-deftest org-glean-test-tab-previews-selected-member-in-expanded-group ()
+  (org-glean-test--corpus
+    (let* ((path-a (expand-file-name "a.org" root))
+           (path-b (expand-file-name "b.org" root))
+           (key-b nil))
+      (org-glean-test--write path-a "* ServiceOps\nA\n")
+      (org-glean-test--write path-b "* ServiceOps\nB\n")
+      (org-glean-reconcile)
+      (let* ((items (mapcar (lambda (item)
+                              (org-glean--alist-put :match-type 'fuzzy
+                               (org-glean--alist-put :score 91 item)))
+                            (org-glean--results
+                             (sqlite-select (org-glean--db)
+                                            "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE kind='heading' ORDER BY path"))))
+             (a (car items))
+             (b (cadr items))
+             (key-b (alist-get :key b))
+             (group-key (list (alist-get :path a) (alist-get :title a)))
+             (results-buffer (get-buffer-create "*Org Glean Expanded Preview*"))
+             (origin (selected-window)))
+        (set-window-buffer origin results-buffer)
+        (with-current-buffer results-buffer
+          (org-glean-results-mode)
+          (setq org-glean--results-query "ServiceOps"
+                org-glean--results-groups (list (cons group-key (list a b)))
+                org-glean--results-expanded-groups (list group-key)
+                tabulated-list-entries (mapcar #'org-glean--tabulated-row (list a b)))
+           (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () key-b)))
+             (should (equal path-b (alist-get :path (org-glean--tabulated-row-result))))
+             (org-glean-results-preview))
+           (let ((window (get-buffer-window (get-file-buffer path-b))))
+             (should (window-live-p window))
+             (should (= (window-point window) (alist-get :position b))))
+          (should (eq results-buffer (window-buffer origin)))
+          (save-window-excursion
+            (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () key-b)))
+              (org-glean-results-visit)
+              (should (equal "ServiceOps" (string-trim (org-get-heading t t t t)))))))
+        (when (buffer-live-p results-buffer) (kill-buffer results-buffer))
+        (dolist (path (list path-a path-b))
+          (let ((buffer (get-file-buffer path)))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest org-glean-test-stable-id-navigation-locates-heading-after-edits ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "stable.org" root)))
+      (org-glean-test--write path
+                             "* Stable target\n:PROPERTIES:\n:ID: stable-target\n:END:\nbodyterm\n")
+      (org-glean-reconcile)
+      (let ((result (car (org-glean-search "bodyterm"))))
+        (org-glean-test--write path
+                               "* New heading before\ntext\n* Stable target\n:PROPERTIES:\n:ID: stable-target\n:END:\nbodyterm\n")
+        ;; The indexed target is stale; reconciliation updates its point. A
+        ;; previously held ID result should then navigate to the moved heading.
+        (org-glean-reconcile)
+        (org-glean-visit result)
+        (should (equal "stable-target" (org-entry-get nil "ID")))
+        (should (equal "Stable target" (org-get-heading t t t t)))))))
+
+(ert-deftest org-glean-test-result-groups-collapse-repeated-fuzzy-headings ()
+  (let* ((first '((:key . "one") (:path . "/notes/hours.org")
+                  (:title . "ServiceOps") (:kind . "heading") (:match-type . fuzzy)
+                  (:score . 91) (:source-current . t)))
+         (second '((:key . "two") (:path . "/notes/hours.org")
+                   (:title . "ServiceOps") (:kind . "heading") (:match-type . fuzzy)
+                   (:score . 90) (:source-current . t)))
+         (other '((:key . "other") (:path . "/notes/service.org")
+                  (:title . "service ops") (:kind . "file") (:match-type . exact)
+                  (:score . 100) (:source-current . t)))
+         (groups (org-glean--result-groups (list first other second)))
+         (repeated (cl-find-if (lambda (group) (> (length (cdr group)) 1)) groups))
+         (org-glean--results-groups groups)
+         (org-glean--results-expanded-groups nil))
+    (should (= 2 (length groups)))
+    (should (= 2 (length (cdr repeated))))
+    (should (= 2 (length (org-glean--tabulated-rows))))
+    (should (equal "service ops" (aref (cadar (org-glean--tabulated-rows)) 0)))
+    (should (equal "ServiceOps (2 matches; e expands)"
+                   (aref (cadr (car (last (org-glean--tabulated-rows)))) 0)))
+    (setq org-glean--results-expanded-groups (list (car repeated)))
+    (should (= 3 (length (org-glean--tabulated-rows))))))
+
+(ert-deftest org-glean-test-result-sort-prioritizes-exact-then-lexical-then-fuzzy ()
+  (let* ((fuzzy '((:match-type . fuzzy) (:score . 99)))
+         (lexical '((:match-type . lexical) (:score . 70)))
+         (exact '((:match-type . exact) (:score . 10)))
+         (sorted (sort (list fuzzy lexical exact) #'org-glean--relevance-before-p)))
+    (should (eq exact (nth 0 sorted)))
+    (should (eq lexical (nth 1 sorted)))
+    (should (eq fuzzy (nth 2 sorted)))))
+
+(ert-deftest org-glean-test-result-sort-retains-lexical-bm25-order ()
+  (let* ((lexical-best '((:match-type . lexical) (:score . 94.0)))
+         (lexical-next '((:match-type . lexical) (:score . 93.99)))
+         (fuzzy '((:match-type . fuzzy) (:score . 80.0)))
+         (sorted (sort (list lexical-next fuzzy lexical-best)
+                       #'org-glean--relevance-before-p)))
+    (should (eq lexical-best (nth 0 sorted)))
+    (should (eq lexical-next (nth 1 sorted)))
+    (should (eq fuzzy (nth 2 sorted)))))
 
 (ert-deftest org-glean-test-duplicate-org-id-refuses-navigation ()
   (org-glean-test--corpus
@@ -258,6 +382,10 @@
             (org-glean-results-mode)
             (setq org-glean--results-query "needleterm")
             (org-glean-results-refresh)
+            (should (eq #'org-glean-results-preview
+                        (lookup-key org-glean-results-mode-map (kbd "TAB"))))
+            (should (eq #'org-glean-results-visit
+                        (lookup-key org-glean-results-mode-map (kbd "RET"))))
             (should (= 1 (length tabulated-list-entries)))
             (should (equal '("id-key" ["title" "heading" "source.org" "lexical" "yes"])
                            (org-glean--tabulated-entry

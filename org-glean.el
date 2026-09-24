@@ -506,11 +506,16 @@ When FUZZY is non-nil, add bounded title/heading fuzzy candidates."
                                   (vector query cap)))))
           (lexical (when (and words fts-pattern)
                      (condition-case nil
-                        (org-glean--results
-                         (sqlite-select db
-                                         "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ?"
-                                        (vector fts-pattern cap)))
-                      (error nil))))
+                         (cl-loop for item in
+                                  (org-glean--results
+                                  (sqlite-select db
+                                                  "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ?"
+                                                  (vector fts-pattern cap)))
+                                  for rank from 0
+                                  collect (org-glean--alist-put :score
+                                                               (max 85.0 (- 94.0 (* rank 0.01)))
+                                                               item))
+                       (error nil))))
          (all (append exact lexical))
          (seen (make-hash-table :test #'equal)))
     (setq all (cl-remove-if (lambda (item)
@@ -526,8 +531,9 @@ When FUZZY is non-nil, add bounded title/heading fuzzy candidates."
                               for needle = (downcase (string-trim (or query "")))
                               for distance = (string-distance needle title)
                               for scale = (max (length needle) (length title) 1)
-                              for score = (* 100.0 (/ (- scale distance) (float scale)))
-                              when (and (>= score 60.0)
+                               for similarity = (* 100.0 (/ (- scale distance) (float scale)))
+                               for score = (* 0.84 similarity)
+                               when (and (>= similarity 60.0)
                                         (not (gethash (alist-get :key item) seen)))
                               collect (cons score item))))
         (dolist (pair (sort scored (lambda (a b) (> (car a) (car b)))))
@@ -595,6 +601,7 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
          (results (cl-remove-if (lambda (item) (org-glean--filtered-out-p item filters))
                                 all-results))
          (stale-p (cl-some (lambda (item) (not (alist-get :source-current item))) all-results))
+          (results (sort results #'org-glean--relevance-before-p))
          (results (cl-loop for item in results for rank from 1
                            for next = (nth rank results)
                            for score = (or (alist-get :score item) 0)
@@ -629,15 +636,13 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
       (truncated . :false)
       (results . ,(vconcat results)))))
 
-(defun org-glean-visit (result)
-  "Visit RESULT if it still resolves unambiguously in the saved source."
-  (let* ((id (alist-get :org-id result))
-         (db (org-glean--db)))
-    ;; Resolve explicit IDs afresh so a moved heading remains navigable, but
-    ;; never guess if the configured roots contain duplicate IDs.
+(defun org-glean--refresh-result (result)
+  "Resolve stable RESULT by ID and recheck its database/source snapshot."
+  (let* ((db (org-glean--db))
+         (id (alist-get :org-id result)))
     (when id
       (let ((matches (sqlite-select db
-                                     "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE org_id=? LIMIT 2"
+                                    "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE org_id=? LIMIT 2"
                                     (vector id))))
         (cond
          ((> (length matches) 1)
@@ -647,51 +652,70 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
          (t (user-error "Org ID %s is no longer indexed; reconcile and search again" id)))))
     (let* ((path (alist-get :path result))
            (digest (alist-get :digest result))
-           (position (alist-get :position result))
            (current (caar (sqlite-select db "SELECT digest FROM targets WHERE key=?"
                                          (vector (alist-get :key result))))))
       (unless (equal current digest)
         (user-error "Result is no longer indexed; search again"))
-      (unless (and (file-exists-p path)
-                   (equal digest (org-glean--digest path)))
+      (unless (and (file-exists-p path) (equal digest (org-glean--digest path)))
         (user-error "Source changed; reconcile and search again"))
-      (when (and (get-file-buffer path) (buffer-modified-p (get-file-buffer path)))
-        (let ((edited-buffer (get-file-buffer path)))
-          (when (and (buffer-file-name edited-buffer)
-                     (not (verify-visited-file-modtime edited-buffer)))
-            (user-error "Visited buffer is stale; revert it before navigating"))
-          (user-error "Source has unsaved changes; save before navigating")))
-      (let ((buffer (find-file-noselect path)))
-        (with-current-buffer buffer
-          (when (and buffer-file-name (not (verify-visited-file-modtime buffer)))
-            (user-error "Visited buffer is stale; revert it before navigating"))
-          (let ((saved-id id)
-                (target result))
-          (save-restriction
-            (widen)
-            (if saved-id
-                (progn
-                  (goto-char (point-min))
-                  (unless (re-search-forward
-                           (format "^\\*+ +%s[ \t]*$"
-                                   (regexp-quote (alist-get :title target))) nil t)
-                    (user-error "Stable-ID heading was not found in its resolved file"))
-                  (unless (equal saved-id (org-entry-get nil "ID"))
-                    (user-error "Stable-ID heading no longer matches the index")))
-              (goto-char position))
-            (when (and (equal (alist-get :kind result) "heading")
-                       (or (not (org-at-heading-p))
-                             (not (equal (alist-get :title target)
-                                        (org-get-heading t t t t)))
-                             (not (equal saved-id (org-entry-get nil "ID")))))
-              (user-error "Heading no longer matches the indexed target")))))
-        (pop-to-buffer buffer)
-        (goto-char position)))))
+      result)))
+
+(defun org-glean--target-position (buffer result)
+  "Resolve RESULT within BUFFER, returning a validated heading position."
+  (with-current-buffer buffer
+    (when (and buffer-file-name (not (verify-visited-file-modtime buffer)))
+      (user-error "Visited buffer is stale; revert it before navigating"))
+    (when (buffer-modified-p)
+      (user-error "Source has unsaved changes; save before navigating"))
+    (save-restriction
+      (widen)
+      (if (not (equal (alist-get :kind result) "heading"))
+          (or (alist-get :position result) (point-min))
+        (let ((id (alist-get :org-id result))
+              positions)
+          (if id
+              (org-map-entries
+               (lambda ()
+                 (when (equal id (org-entry-get nil "ID"))
+                   (push (point) positions))) nil 'file)
+            (goto-char (alist-get :position result))
+            (when (and (org-at-heading-p)
+                       (equal (alist-get :title result) (org-get-heading t t t t)))
+              (push (point) positions)))
+          (unless (= (length positions) 1)
+            (user-error "Heading no longer resolves uniquely; reconcile and search again"))
+          (car positions))))))
+
+(defun org-glean-open-result (result &optional preview)
+  "Open RESULT. With PREVIEW, show another window and retain selected-window focus."
+  (let* ((resolved (org-glean--refresh-result result))
+         (path (alist-get :path resolved))
+         (buffer (find-file-noselect path))
+         (position (org-glean--target-position buffer resolved)))
+    (with-current-buffer buffer (goto-char position))
+    (if preview
+        (let ((window (display-buffer buffer '(display-buffer-pop-up-window)))
+              (origin (selected-window)))
+          (when (window-live-p window)
+            (set-window-point window position))
+          (when (window-live-p origin)
+            (select-window origin)))
+      (let ((window (display-buffer buffer '(display-buffer-pop-up-window))))
+        (select-window window)
+        (with-current-buffer buffer (goto-char position))))
+    buffer))
+
+(defun org-glean-visit (result)
+  "Visit RESULT and move point to the resolved target."
+  (interactive)
+  (org-glean-open-result result nil))
 
 (defvar org-glean-results-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'org-glean-results-visit)
+    (define-key map (kbd "TAB") #'org-glean-results-preview)
+    (define-key map (kbd "e") #'org-glean-results-toggle-group)
     (define-key map (kbd "g") #'org-glean-results-refresh)
     map))
 
@@ -701,21 +725,118 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
         [("Title" 38 t) ("Kind" 10 t) ("Source" 28 t) ("Match" 12 t)
          ("Fresh" 7 t)])
   (setq tabulated-list-padding 2
-        tabulated-list-sort-key (cons "Match" nil))
+        tabulated-list-sort-key nil)
   (tabulated-list-init-header))
 
 (defvar-local org-glean--results-query nil)
 (defvar-local org-glean--results-filters nil)
+(defvar-local org-glean--results-items nil)
+(defvar-local org-glean--results-groups nil)
+(defvar-local org-glean--results-expanded-groups nil)
+
+(defun org-glean--result-sort-key (item)
+  "Return the results-buffer order key for ITEM."
+  (list (or (cdr (assq (alist-get :match-type item)
+                       '((exact . 0) (lexical . 1) (fuzzy . 2)))) 3)))
+
+(defun org-glean--relevance-before-p (left right)
+  "Return non-nil if LEFT has higher display relevance than RIGHT."
+  (let ((left-key (org-glean--result-sort-key left))
+        (right-key (org-glean--result-sort-key right)))
+    (if (= (car left-key) (car right-key))
+        (let ((left-score (or (alist-get :score left) 0))
+              (right-score (or (alist-get :score right) 0)))
+          (if (= left-score right-score)
+              (< (or (alist-get :rank left) most-positive-fixnum)
+                 (or (alist-get :rank right) most-positive-fixnum))
+            (> left-score right-score)))
+      (< (car left-key) (car right-key)))))
+
+(defun org-glean--result-groups (items)
+  "Group repeated fuzzy headings in the same file from ITEMS."
+  (let (groups ordered)
+    (dolist (item items)
+      (let* ((groupable (and (eq (alist-get :match-type item) 'fuzzy)
+                             (equal (alist-get :kind item) "heading")))
+             (group-key (and groupable
+                             (list (alist-get :path item) (alist-get :title item))))
+             (group (and group-key
+                         (cl-find-if (lambda (existing)
+                                       (equal group-key (car existing)))
+                                     groups))))
+        (if group
+            (setcdr group (append (cdr group) (list item)))
+          (let ((entry (cons (or group-key (alist-get :key item)) (list item))))
+            (push entry groups)
+            (push entry ordered)))))
+    (let ((ordered (nreverse ordered)))
+      (dolist (group ordered)
+        (setcdr group (sort (cdr group) #'org-glean--relevance-before-p)))
+      (sort ordered
+          (lambda (left right)
+            (org-glean--relevance-before-p (cadr left) (cadr right)))))))
+
+(defun org-glean--tabulated-row (item &optional count)
+  "Format ITEM as a row, optionally labelling a COUNT of grouped hits."
+  (let* ((key (alist-get :key item))
+         (title (or (alist-get :title item) ""))
+         (title (if (and count (> count 1))
+                    (format "%s (%d matches; e expands)" title count)
+                  title))
+         (kind (or (alist-get :kind item) ""))
+         (source (file-name-nondirectory (alist-get :path item)))
+         (match (symbol-name (alist-get :match-type item)))
+         (fresh (if (alist-get :source-current item) "yes" "stale")))
+    (list key (vector title kind source match fresh))))
+
+(defun org-glean--tabulated-rows ()
+  "Build collapsed/expanded tabulated rows from the current search results."
+  (let (rows)
+    (dolist (group org-glean--results-groups)
+      (let* ((items (cdr group))
+             (group-key (car group))
+             (expanded (member group-key org-glean--results-expanded-groups)))
+        (if (and expanded (> (length items) 1))
+            (dolist (item items) (push (org-glean--tabulated-row item) rows))
+          (push (org-glean--tabulated-row
+                 (car (sort (copy-sequence items) #'org-glean--relevance-before-p))
+                 (length items)) rows))))
+    (nreverse rows)))
+
+(defun org-glean--buffer-result-items ()
+  "Return ordered result items for the current results buffer."
+  (apply #'append (mapcar #'cdr org-glean--results-groups)))
+
+(defun org-glean--tabulated-row-result ()
+  "Resolve the result represented by the current tabulated row."
+  (let ((key (tabulated-list-get-id)))
+    (or (cl-find key (org-glean--buffer-result-items)
+                 :key (lambda (item) (alist-get :key item)) :test #'equal)
+        (user-error "Result disappeared; refresh the list"))))
+
+(defun org-glean--selected-result-group ()
+  "Return the group represented by the currently selected row."
+  (let* ((key (tabulated-list-get-id))
+         (group (cl-find-if (lambda (candidate)
+                              (or (equal key (car candidate))
+                                  (cl-some (lambda (item)
+                                             (equal key (alist-get :key item)))
+                                           (cdr candidate))))
+                            org-glean--results-groups)))
+    (unless group (user-error "Result disappeared; refresh the list"))
+    (cdr group)))
+
+(defun org-glean--selected-result-items ()
+  "Return the selected target, or representative target for a collapsed group."
+  (let* ((key (tabulated-list-get-id))
+         (items (org-glean--selected-result-group))
+         (selected (cl-find key items :key (lambda (item) (alist-get :key item))
+                            :test #'equal)))
+    (list (or selected (car items)))))
 
 (defun org-glean--tabulated-entry (item)
   "Format result ITEM as one Tabulated List entry."
-  (let ((key (alist-get :key item))
-        (title (or (alist-get :title item) ""))
-        (kind (or (alist-get :kind item) ""))
-        (source (file-name-nondirectory (alist-get :path item)))
-        (match (symbol-name (alist-get :match-type item)))
-        (fresh (if (alist-get :source-current item) "yes" "stale")))
-    (list key (vector title kind source match fresh))))
+  (org-glean--tabulated-row item))
 
 (defun org-glean-results-refresh ()
   "Refresh the current Org Glean result buffer."
@@ -723,25 +844,45 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
   (unless org-glean--results-query (user-error "No Org Glean query to refresh"))
   (let* ((response (org-glean-search-api org-glean--results-query 100 t
                                          org-glean--results-filters))
-         (results (alist-get 'results response))
-         (rows (mapcar #'org-glean--tabulated-entry (append results nil))))
-    (setq tabulated-list-entries rows)
+         (results (alist-get 'results response)))
+    (setq org-glean--results-items (append results nil)
+          org-glean--results-groups (org-glean--result-groups org-glean--results-items)
+          org-glean--results-expanded-groups
+          (cl-remove-if-not (lambda (key)
+                              (cl-some (lambda (group) (equal key (car group)))
+                                       org-glean--results-groups))
+                            org-glean--results-expanded-groups)
+          tabulated-list-entries (org-glean--tabulated-rows))
     (tabulated-list-print t)
-    (setq header-line-format
-          (format "Query: %s | freshness: %s | %d results — RET visits, g refreshes"
+      (setq header-line-format
+          (format "Query: %s | freshness: %s | %d targets — TAB previews, RET visits, e expands/collapses, g refreshes"
                   org-glean--results-query (alist-get 'freshness response)
                   (length results)))))
 
 (defun org-glean-results-visit ()
   "Visit the indexed target on the current results row."
   (interactive)
-  (let* ((key (tabulated-list-get-id))
-         (response (org-glean-search-api org-glean--results-query 100 t
-                                         org-glean--results-filters))
-         (item (cl-find key (append (alist-get 'results response) nil)
-                        :key (lambda (result) (alist-get :key result)) :test #'equal)))
-    (unless item (user-error "Result disappeared; refresh the list"))
-    (org-glean-visit item)))
+  (org-glean-visit (org-glean--tabulated-row-result)))
+
+(defun org-glean-results-preview ()
+  "Preview the selected result in another window without moving focus."
+  (interactive)
+  (org-glean-open-result (org-glean--tabulated-row-result) t))
+
+(defun org-glean-results-toggle-group ()
+  "Expand/collapse repeated fuzzy hits on the selected file/title group."
+  (interactive)
+  (let* ((selected (org-glean--selected-result-group))
+         (key (list (alist-get :path (car selected))
+                    (alist-get :title (car selected)))))
+    (unless (> (length selected) 1)
+      (user-error "Selected row has no repeated matches to expand"))
+    (if (member key org-glean--results-expanded-groups)
+        (setq org-glean--results-expanded-groups
+              (delete key org-glean--results-expanded-groups))
+      (push key org-glean--results-expanded-groups))
+          (setq tabulated-list-entries (org-glean--tabulated-rows))
+    (tabulated-list-print t)))
 
 (defun org-glean-search-buffer (query &optional filters)
   "Show QUERY in an exploration results buffer.

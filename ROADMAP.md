@@ -14,7 +14,11 @@
    semantic fallback until a semantic provider is integrated and validated.
 
 Results buffer uses Emacs `tabulated-list-entries` rows in `(ID [COLUMNS])`
-format; its rendering is covered by synthetic-corpus tests.
+format; it orders exact/lexical/fuzzy hits, groups repeated fuzzy file/title hits
+with `e` to expand/collapse, maps `TAB` to preview without taking focus and
+`RET` to jump to the selected (including expanded group-member) heading by ID.
+Lexical scores preserve BM25 ordering and are ranked above fuzzy candidates.
+These behaviors are covered by synthetic-corpus tests.
 
 ## Mid term
 
