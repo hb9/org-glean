@@ -707,6 +707,16 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
 (defvar-local org-glean--results-query nil)
 (defvar-local org-glean--results-filters nil)
 
+(defun org-glean--tabulated-entry (item)
+  "Format result ITEM as one Tabulated List entry."
+  (let ((key (alist-get :key item))
+        (title (or (alist-get :title item) ""))
+        (kind (or (alist-get :kind item) ""))
+        (source (file-name-nondirectory (alist-get :path item)))
+        (match (symbol-name (alist-get :match-type item)))
+        (fresh (if (alist-get :source-current item) "yes" "stale")))
+    (list key (vector title kind source match fresh))))
+
 (defun org-glean-results-refresh ()
   "Refresh the current Org Glean result buffer."
   (interactive)
@@ -714,14 +724,7 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
   (let* ((response (org-glean-search-api org-glean--results-query 100 t
                                          org-glean--results-filters))
          (results (alist-get 'results response))
-         (rows (mapcar (lambda (item)
-                         (let* ((key (alist-get :key item))
-                                (title (or (alist-get :title item) ""))
-                                (kind (or (alist-get :kind item) ""))
-                                (source (file-name-nondirectory (alist-get :path item)))
-                                (match (symbol-name (alist-get :match-type item)))
-                                (fresh (if (alist-get :source-current item) "yes" "stale")))
-                           (cons key (vector title kind source match fresh)))) results)))
+         (rows (mapcar #'org-glean--tabulated-entry (append results nil))))
     (setq tabulated-list-entries rows)
     (tabulated-list-print t)
     (setq header-line-format

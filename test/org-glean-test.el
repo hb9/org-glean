@@ -247,6 +247,37 @@
         (should (= 1 (length (alist-get 'results decoded))))
         (should (equal "heading" (alist-get 'kind (aref (alist-get 'results decoded) 0))))))))
 
+(ert-deftest org-glean-test-results-buffer-renders-and-visits-rows ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "service-ops.org" root)
+                           "* Fix AADSTS70011 invalid scope error during token refresh\nneedleterm\n")
+    (org-glean-reconcile)
+    (let ((buffer (get-buffer-create "*Org Glean Test Results*")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (org-glean-results-mode)
+            (setq org-glean--results-query "needleterm")
+            (org-glean-results-refresh)
+            (should (= 1 (length tabulated-list-entries)))
+            (should (equal '("id-key" ["title" "heading" "source.org" "lexical" "yes"])
+                           (org-glean--tabulated-entry
+                            '((:key . "id-key") (:title . "title") (:kind . "heading")
+                               (:path . "/tmp/source.org") (:match-type . lexical)
+                               (:source-current . t)))))
+            (should (listp (car tabulated-list-entries)))
+            (should (vectorp (cadr (car tabulated-list-entries))))
+            (goto-char (point-min))
+            (while (and (not (tabulated-list-get-id))
+                        (= 0 (forward-line 1)))
+              nil)
+            (should (equal (tabulated-list-get-id) (car (car tabulated-list-entries))))
+            (save-window-excursion
+              (org-glean-results-visit)
+              (should (equal (file-truename (expand-file-name "service-ops.org" root))
+                             (file-truename buffer-file-name)))
+              (should (org-at-heading-p))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest org-glean-test-mcp-handler-fails-closed-with-no-roots ()
   (let ((org-glean-roots nil)
         (org-glean-mcp-allowed-roots nil))

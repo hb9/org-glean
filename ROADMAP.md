@@ -13,6 +13,9 @@
 6. Compare Org Glean candidates against `orgk --for-capture`; preserve the
    semantic fallback until a semantic provider is integrated and validated.
 
+Results buffer uses Emacs `tabulated-list-entries` rows in `(ID [COLUMNS])`
+format; its rendering is covered by synthetic-corpus tests.
+
 ## Mid term
 
 - Compare lexical/vector providers using the same Org projections and
