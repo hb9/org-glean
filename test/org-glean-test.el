@@ -423,5 +423,66 @@
         (should (= 0 (alist-get 'candidate-count response)))
         (should (eq 'stale-source-present (alist-get 'freshness response)))))))
 
+(ert-deftest org-glean-test-search-pages-past-excluded-prefix-before-filling-limit ()
+  (org-glean-test--corpus
+    (dotimes (n 105)
+      (org-glean-test--write
+       (expand-file-name (format "a%03d.org" n) root)
+       "#+PROPERTY: CAPTURE_POLICY none\n* Hidden match\nsharedneedle\n"))
+    (org-glean-test--write (expand-file-name "z-eligible.org" root)
+                           "* Eligible destination\nsharedneedle\n")
+    (let ((org-glean-search-page-size 20))
+      (org-glean-reconcile)
+      (let* ((response (org-glean-search-api
+                        "sharedneedle" 1 nil '(:exclude-property-values ("none"))))
+             (results (alist-get 'results response)))
+        (should (= 1 (length results)))
+        (should (equal "Eligible destination" (alist-get :title (aref results 0))))
+        (should (eq 'sources-checked-current (alist-get 'freshness response)))
+        (should (eq 'complete (alist-get 'completeness response)))))))
+
+(ert-deftest org-glean-test-mcp-root-filter-applied-before-result-limit ()
+  (org-glean-test--corpus
+    (let* ((allowed (expand-file-name "allowed" root))
+           (other (expand-file-name "other" root))
+           (org-glean-roots (list (list "all" root nil nil)))
+           (org-glean-mcp-allowed-roots (list allowed)))
+      (org-glean-test--write (expand-file-name "a.org" other) "* Outside\nrootneedle\n")
+      (org-glean-test--write (expand-file-name "z.org" allowed) "* Inside\nrootneedle\n")
+      (org-glean-reconcile)
+      (let* ((decoded (json-parse-string
+                       (org-glean-mcp--handler '((query . "rootneedle") (limit . 1)))
+                       :object-type 'alist))
+             (results (alist-get 'results decoded)))
+        (should (= 1 (length results)))
+        (should (string-prefix-p allowed (alist-get 'path (aref results 0))))))))
+
+(ert-deftest org-glean-test-search-work-budget-reports-incomplete-empty ()
+  (org-glean-test--corpus
+    (dotimes (n 12)
+      (org-glean-test--write
+       (expand-file-name (format "%02d.org" n) root)
+       "#+PROPERTY: CAPTURE_POLICY none\n* Hidden\nrareprobe\n"))
+    (org-glean-reconcile)
+    (let* ((org-glean-search-work-budget 5)
+           (response (org-glean-search-api
+                      "rareprobe" 2 nil '(:exclude-property-values ("none")))))
+      (should (= 0 (alist-get 'candidate-count response)))
+      (should (eq 'incomplete (alist-get 'completeness response)))
+      (should (eq t (alist-get 'truncated response)))
+      (should (eq 'incomplete (alist-get 'degraded response))))))
+
+(ert-deftest org-glean-test-result-limit-reports-truncation ()
+  (org-glean-test--corpus
+    (dotimes (n 4)
+      (org-glean-test--write (expand-file-name (format "%d.org" n) root)
+                             (format "* Hit %d\nlimitneedle\n" n)))
+    (org-glean-reconcile)
+    (let ((response (org-glean-search-api "limitneedle" 2)))
+      (should (= 2 (alist-get 'candidate-count response)))
+      (should (eq t (alist-get 'truncated response)))
+      (should (eq 'truncated (alist-get 'completeness response)))
+      (should (eq :false (alist-get 'degraded response))))))
+
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

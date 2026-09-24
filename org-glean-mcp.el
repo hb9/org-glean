@@ -31,18 +31,18 @@ An empty value falls back to the configured Org Glean roots."
              (exclude-titles (append (alist-get 'exclude_titles args) nil))
              (property-key (alist-get 'property_key args))
              (property-value (alist-get 'property_value args))
-             (filters (list :exclude-property-values exclude-values
+              (roots (or org-glean-mcp-allowed-roots
+                         (mapcar #'cadr org-glean-roots)))
+              (filters (list :allowed-roots roots
+                             :exclude-property-values exclude-values
                             :property-equals (when (and property-key property-value)
                                                (list (cons property-key property-value)))
                             :max-heading-level max-level
                             :exclude-titles exclude-titles))
              response)
         (unless (stringp query) (error "`query' string is required"))
+         (unless roots (error "No Org Glean root is allowed for MCP search"))
          (setq response (org-glean-search-api query limit t filters))
-          (let ((roots (or org-glean-mcp-allowed-roots
-                            (mapcar #'cadr org-glean-roots))))
-           (unless roots (error "No Org Glean root is allowed for MCP search"))
-           (setq response (org-glean-mcp--restrict response roots)))
         (json-encode (org-glean-mcp--json-normalize response)))
     (error (json-encode `((schema-version . 1)
                           (error . ,(error-message-string err)))))))
@@ -99,7 +99,7 @@ An empty value falls back to the configured Org Glean roots."
    :name "org-glean_search"
   :title "Search Org with Org Glean"
   :description
-  "Search configured Org roots with bounded exact, lexical, and fuzzy retrieval. Optional filters exclude property values, require exact metadata property pairs, cap heading depth, or omit titles. Returns provisional or Org-ID targets with file, outline path, score, reason, source freshness, and a location link. This tool never modifies Org files. Use org-get-node to resolve/read a target before capture."
+   "Search configured Org roots with bounded exact, lexical, and fuzzy retrieval. Optional filters exclude property values, require exact metadata property pairs, cap heading depth, or omit titles. Returns provisional or Org-ID targets with file, outline path, score, reason, source freshness, a location link, and completeness/truncation metadata. This tool never modifies Org files. Use org-get-node to resolve/read a target before capture."
    :input-schema org-glean-mcp--input-schema
   :function #'org-glean-mcp--handler
   :annotations '((readOnlyHint . t)

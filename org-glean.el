@@ -43,6 +43,25 @@ An empty INCLUDES list accepts every .org file."
   :type 'integer
   :group 'org-glean)
 
+(defcustom org-glean-search-work-budget 2000
+  "Maximum index rows examined by all providers in one search."
+  :type 'integer
+  :group 'org-glean)
+
+(defcustom org-glean-search-page-size 100
+  "Maximum number of candidate rows requested in one SQLite page."
+  :type 'integer
+  :group 'org-glean)
+
+(defcustom org-glean-fuzzy-candidate-limit 500
+  "Maximum trigram candidates scored by fuzzy search."
+  :type 'integer
+  :group 'org-glean)
+
+(defvar org-glean--last-search-completeness 'complete)
+(defvar org-glean--last-search-examined 0)
+(defvar org-glean--provider-stale-seen nil)
+
 (defvar org-glean--database nil)
 (defvar org-glean--database-path nil)
 (defvar org-glean--fts5-supported nil)
@@ -494,68 +513,8 @@ reported and preserved; a failed tree walk never deletes indexed sources."
 
 (defun org-glean-search (query &optional limit fuzzy)
   "Search exact and FTS targets for QUERY, returning at most LIMIT results.
-When FUZZY is non-nil, add bounded title/heading fuzzy candidates."
-  (let* ((db (org-glean--db))
-         (fts-pattern (org-glean--fts-pattern query))
-         (cap (max 1 (min 100 (or limit org-glean-search-limit))))
-         (words (split-string (string-trim (or query "")) "[[:space:]]+" t))
-         (exact (when (and (stringp query) (not (string-empty-p query)))
-                  (org-glean--results
-                   (sqlite-select db
-                          "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ?"
-                                  (vector query cap)))))
-          (lexical (when (and words fts-pattern)
-                     (condition-case nil
-                         (cl-loop for item in
-                                  (org-glean--results
-                                  (sqlite-select db
-                                                  "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ?"
-                                                  (vector fts-pattern cap)))
-                                  for rank from 0
-                                  collect (org-glean--alist-put :score
-                                                               (max 85.0 (- 94.0 (* rank 0.01)))
-                                                               item))
-                       (error nil))))
-         (all (append exact lexical))
-         (seen (make-hash-table :test #'equal)))
-    (setq all (cl-remove-if (lambda (item)
-                              (if (gethash (alist-get :key item) seen) t
-                                (puthash (alist-get :key item) t seen) nil)) all))
-    (when (and fuzzy (< (length all) cap)
-               (not (string-empty-p (string-trim (or query "")))))
-      (let* ((candidates (sqlite-select db
-                                          "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets ORDER BY title LIMIT 2000"))
-             (records (org-glean--results candidates))
-             (scored (cl-loop for item in records
-                              for title = (downcase (or (alist-get :title item) ""))
-                              for needle = (downcase (string-trim (or query "")))
-                              for distance = (string-distance needle title)
-                              for scale = (max (length needle) (length title) 1)
-                               for similarity = (* 100.0 (/ (- scale distance) (float scale)))
-                               for score = (* 0.84 similarity)
-                               when (and (>= similarity 60.0)
-                                        (not (gethash (alist-get :key item) seen)))
-                              collect (cons score item))))
-        (dolist (pair (sort scored (lambda (a b) (> (car a) (car b)))))
-          (when (< (length all) cap)
-            (let ((item (cdr pair)))
-              (setq all (append all (list (append item
-                                                  `((:match-type . fuzzy)
-                                                    (:score . ,(round (car pair))))))))
-              (puthash (alist-get :key item) t seen))))))
-    (setq all (cl-subseq all 0 (min cap (length all))))
-    (mapcar (lambda (item)
-              (let* ((match-type (or (alist-get :match-type item)
-                                     (if (member item exact) 'exact 'lexical)))
-                     (score (or (alist-get :score item)
-                                (if (eq match-type 'exact) 100.0 85.0)))
-                     (current (and (file-exists-p (alist-get :path item))
-                                   (equal (alist-get :digest item)
-                                          (org-glean--digest (alist-get :path item))))))
-                (setq item (org-glean--alist-put :match-type match-type item)
-                      item (org-glean--alist-put :score score item)
-                      item (org-glean--alist-put :source-current current item))
-                item)) all)))
+When FUZZY is non-nil, add bounded fuzzy candidates."
+  (car (org-glean-search-filtered query limit fuzzy nil)))
 
 (defun org-glean--fts-pattern (query)
   "Return a safely quoted FTS5 prefix query for QUERY, or nil if empty."
@@ -590,19 +549,184 @@ When FUZZY is non-nil, add bounded title/heading fuzzy candidates."
            (> (or (alist-get :level item) 0) (plist-get filters :max-heading-level)))
       (member (downcase (or (alist-get :title item) ""))
               (mapcar #'downcase (plist-get filters :exclude-titles)))
-      (not (org-glean--properties-match-p
-            (alist-get :properties item) (plist-get filters :property-equals)))))
+       (not (org-glean--properties-match-p
+             (alist-get :properties item) (plist-get filters :property-equals)))))
+
+(defun org-glean--in-roots-p (item roots)
+  "Return non-nil when ITEM belongs to one of ROOTS, without symlink escape."
+  (or (null roots)
+      (let ((path (alist-get :path item)))
+        (and path (file-exists-p path)
+             (cl-some (lambda (root)
+                        (let ((root (file-name-as-directory (file-truename root)))
+                              (true-path (file-truename path)))
+                          (and (file-directory-p root) (file-in-directory-p true-path root))))
+                      roots)))))
+
+(defun org-glean--eligible-p (item filters)
+  "Return non-nil when ITEM passes FILTERS, including allowed-root scope."
+  (and (not (org-glean--filtered-out-p item filters))
+       (org-glean--in-roots-p item (plist-get filters :allowed-roots))))
+
+(defun org-glean--collect-provider (db sql params filters limit budget page-size seen)
+  "Read provider candidates in pages, filtering before filling LIMIT.
+Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
+  (let ((offset 0) (examined 0) (items nil) (extra nil) (done nil))
+    (while (and (not done) (< examined budget) (not extra)
+                (< (length items) (1+ limit)))
+      (let* ((size (min page-size (- budget examined)))
+             (rows (org-glean--results
+                    (sqlite-select db sql (vconcat params (vector size offset))))))
+        (setq examined (+ examined (length rows))
+              offset (+ offset (length rows))
+              done (< (length rows) size))
+        (dolist (item rows)
+          (when (or (not (file-exists-p (alist-get :path item)))
+                    (not (equal (alist-get :digest item)
+                                (org-glean--digest (alist-get :path item)))))
+            (setq org-glean--provider-stale-seen t))
+          (unless (gethash (alist-get :key item) seen)
+            (when (org-glean--eligible-p item filters)
+              (if (>= (length items) limit)
+                  (setq extra t)
+                (puthash (alist-get :key item) t seen)
+                (push item items)))))))
+    (list (nreverse items) examined
+          (and (not done) (not extra) (>= examined budget)
+               (<= (length items) limit))
+          extra)))
+
+(defun org-glean--trigrams (text)
+  "Return the unique padded trigrams from TEXT."
+  (let ((text (concat "  " (downcase text) "  ")) result)
+    (dotimes (index (max 1 (- (length text) 2)))
+      (push (substring text index (+ index 3)) result))
+    (let ((unique (delete-dups (nreverse result))))
+      (if (<= (length unique) 32) unique
+        (cl-loop for index below 32
+                 collect (nth (/ (* index (1- (length unique))) 31) unique))))))
+
+(defun org-glean--collect-fuzzy (db query filters limit budget page-size seen)
+  "Collect typo-tolerant title results from bounded trigram candidates."
+  (let* ((needle (downcase (string-trim query)))
+         (trigrams (org-glean--trigrams needle))
+         (where (mapconcat (lambda (_) "lower(title) LIKE ?") trigrams " OR "))
+         (patterns (mapcar (lambda (gram) (concat "%" gram "%")) trigrams))
+         (sql (format "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE %s ORDER BY title,path,position LIMIT ? OFFSET ?" where))
+         (scan-cap (min budget org-glean-fuzzy-candidate-limit))
+         (offset 0) (examined 0) (done nil) scored extra)
+    (while (and (not done) (< examined scan-cap) (not extra))
+      (let* ((size (min page-size (- scan-cap examined)))
+             (rows (org-glean--results
+                    (sqlite-select db sql (vconcat patterns (vector size offset))))))
+        (setq examined (+ examined (length rows))
+              offset (+ offset (length rows))
+              done (< (length rows) size))
+        (dolist (item rows)
+          (when (or (not (file-exists-p (alist-get :path item)))
+                    (not (equal (alist-get :digest item)
+                                (org-glean--digest (alist-get :path item)))))
+            (setq org-glean--provider-stale-seen t))
+          (unless (gethash (alist-get :key item) seen)
+            (when (org-glean--eligible-p item filters)
+              (let* ((title (downcase (or (alist-get :title item) "")))
+                     (scale (max 1 (length needle) (length title)))
+                     (similarity (* 100.0 (/ (- scale (string-distance needle title))
+                                             (float scale)))))
+                (when (>= similarity 60.0)
+                  (push (cons similarity item) scored))))))))
+    (setq scored (sort scored (lambda (left right) (> (car left) (car right)))))
+    (let* ((selected (cl-subseq scored 0 (min (length scored) (1+ limit))))
+           (matches (mapcar (lambda (pair)
+                              (let ((item (cdr pair)))
+                                (puthash (alist-get :key item) t seen)
+                                (setf (alist-get :match-type item) 'fuzzy
+                                      (alist-get :score item) (* 0.84 (car pair)))
+                                item))
+                            (cl-subseq selected 0 (min limit (length selected))))))
+      (setq extra (> (length scored) (length matches)))
+      (list matches examined
+            (and (not done) (not extra) (>= examined scan-cap))
+            extra))))
+
+(defun org-glean--mark-result (item match-type rank)
+  "Add match metadata and source freshness to ITEM."
+  (setf (alist-get :match-type item) (or (alist-get :match-type item) match-type)
+        (alist-get :score item) (or (alist-get :score item)
+                                    (if (eq match-type 'exact) 100.0
+                                      (max 85.0 (- 94.0 (* rank 0.01)))))
+        (alist-get :source-current item)
+        (and (file-exists-p (alist-get :path item))
+             (equal (alist-get :digest item) (org-glean--digest (alist-get :path item)))))
+  item)
+
+(defun org-glean-search-filtered (query limit fuzzy filters)
+  "Search QUERY, applying FILTERS and :allowed-roots before LIMIT."
+  (let* ((db (org-glean--db))
+         (limit (max 1 (min 100 (or limit org-glean-search-limit))))
+         (budget (max 1 org-glean-search-work-budget))
+         (page-size (max 1 (min 200 org-glean-search-page-size)))
+         (remaining budget)
+         (seen (make-hash-table :test #'equal))
+         (org-glean--provider-stale-seen nil)
+         exact lexical fuzzy-results
+         (extra nil) (incomplete nil))
+    (when (and (stringp query) (not (string-empty-p query)))
+      (let ((page (org-glean--collect-provider
+                   db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
+                   (vector query) filters (1+ limit) remaining page-size seen)))
+        (setq exact (nth 0 page) remaining (- remaining (nth 1 page))
+              incomplete (nth 2 page) extra (nth 3 page))))
+    (when (and (not extra) (not incomplete) (> remaining 0))
+      (let ((fts (org-glean--fts-pattern query)))
+        (when fts
+          (let ((page (condition-case nil
+                          (org-glean--collect-provider
+                           db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
+                           (vector fts) filters (1+ (- limit (length exact)))
+                           remaining page-size seen)
+                        (error nil))))
+            (when page
+              (setq lexical (nth 0 page) remaining (- remaining (nth 1 page))
+                    incomplete (nth 2 page) extra (nth 3 page))))))
+    (setq exact (cl-subseq exact 0 (min (length exact) limit)))
+    (setq lexical (cl-subseq lexical 0 (min (length lexical) limit)))
+    (when (and fuzzy (stringp query) (not (string-empty-p (string-trim query)))
+               (not extra) (not incomplete) (> remaining 0)
+               (< (+ (length exact) (length lexical)) (1+ limit)))
+      (let ((page (org-glean--collect-fuzzy
+                   db query filters (1+ (- limit (length exact) (length lexical)))
+                   remaining page-size seen)))
+        (setq fuzzy-results (nth 0 page) remaining (- remaining (nth 1 page))
+              incomplete (nth 2 page) extra (nth 3 page))))
+      (let* ((all (append (mapcar (lambda (item) (org-glean--mark-result item 'exact 0)) exact)
+                        (cl-loop for item in lexical for rank from 0
+                                 collect (org-glean--mark-result item 'lexical rank))
+                        (mapcar (lambda (item) (org-glean--mark-result item 'fuzzy 0))
+                                fuzzy-results)))
+           (has-extra (> (length all) limit))
+           (all (cl-subseq all 0 (min (length all) (1+ limit))))
+           (truncated (or extra incomplete has-extra))
+           (stale (or org-glean--provider-stale-seen
+                      (cl-some (lambda (item) (not (alist-get :source-current item))) all)))
+           (results (cl-subseq all 0 (min limit (length all)))))
+       (setq org-glean--last-search-completeness
+            (cond (incomplete 'incomplete) ((or extra has-extra) 'truncated) (t 'complete)))
+      (setq org-glean--last-search-examined (- budget remaining))
+       (list results truncated stale)))))
 
 (defun org-glean-search-api (query &optional limit fuzzy filters)
   "Return a versioned, bounded result-set for QUERY.
 FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
-:exclude-property-values, :max-heading-level, and :exclude-titles."
-  (let* ((all-results (org-glean-search query limit fuzzy))
-         (results (cl-remove-if (lambda (item) (org-glean--filtered-out-p item filters))
-                                all-results))
-         (stale-p (cl-some (lambda (item) (not (alist-get :source-current item))) all-results))
-          (results (sort results #'org-glean--relevance-before-p))
-         (results (cl-loop for item in results for rank from 1
+:exclude-property-values, :max-heading-level, :exclude-titles, and
+:allowed-roots. Filters and scope are applied before the result limit."
+  (let* ((limit (max 1 (min 100 (or limit org-glean-search-limit))))
+         (search (org-glean-search-filtered query limit fuzzy filters))
+         (all-results (nth 0 search))
+         (truncated (nth 1 search))
+         (stale-p (nth 2 search))
+         (results (sort all-results #'org-glean--relevance-before-p))
+          (results (cl-loop for item in results for rank from 1
                            for next = (nth rank results)
                            for score = (or (alist-get :score item) 0)
                            for next-score = (or (alist-get :score next) 0)
@@ -621,20 +745,23 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
                                                                  (alist-get :path item)
                                                                  (alist-get :position item)
                                                                  (alist-get :title item))))))))
-         (freshness (cond (stale-p 'stale-source-present)
-                          ((null all-results) 'index-checked)
-                          (t 'sources-checked-current))))
+          (freshness (cond (stale-p 'stale-source-present)
+                           ((null all-results) 'index-checked)
+                           (t 'sources-checked-current)))
+          (completeness org-glean--last-search-completeness))
     `((schema-version . 1)
       (query . ,query)
       (requested . ((lexical . t) (fuzzy . ,(if fuzzy t :false))
                     (filters . ,(if filters t :false))))
       (used . ,(if fuzzy '(exact lexical fuzzy) '(exact lexical)))
-      (degraded . :false)
-      (freshness . ,freshness)
-      (limit . ,(min 100 (max 1 (or limit org-glean-search-limit))))
-      (candidate-count . ,(length results))
-      (truncated . :false)
-      (results . ,(vconcat results)))))
+       (degraded . ,(if (eq completeness 'incomplete) 'incomplete :false))
+       (freshness . ,freshness)
+       (limit . ,limit)
+       (candidate-count . ,(length results))
+       (completeness . ,completeness)
+       (truncated . ,(if truncated t :false))
+       (work-examined . ,org-glean--last-search-examined)
+       (results . ,(vconcat results)))))
 
 (defun org-glean--refresh-result (result)
   "Resolve stable RESULT by ID and recheck its database/source snapshot."
@@ -812,6 +939,8 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
   (let ((key (tabulated-list-get-id)))
     (or (cl-find key (org-glean--buffer-result-items)
                  :key (lambda (item) (alist-get :key item)) :test #'equal)
+        (cl-find-if (lambda (group) (equal key (car group)))
+                    org-glean--results-groups)
         (user-error "Result disappeared; refresh the list"))))
 
 (defun org-glean--selected-result-group ()
