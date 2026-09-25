@@ -68,11 +68,54 @@ semantic materialization; it never touches `targets' or `sources'."
             (sqlite-execute db "CREATE INDEX IF NOT EXISTS chunks_digest ON chunks(text_digest)")
             (sqlite-execute db "CREATE TABLE IF NOT EXISTS vectors (model_id TEXT NOT NULL, text_digest TEXT NOT NULL, dim INTEGER NOT NULL, vector BLOB NOT NULL, PRIMARY KEY (model_id, text_digest))")
             (sqlite-execute db "PRAGMA user_version = 2"))
+          (when (< version 3)
+            ;; Version 2 created `chunks'/`vectors' but never populated chunks
+            ;; for targets that already existed at migration time - only
+            ;; `org-glean--replace' (added/changed sources) writes chunk rows,
+            ;; and reconcile's unchanged-source skip means an already-indexed,
+            ;; untouched source would otherwise never be chunked, ever,
+            ;; leaving semantic search silently empty on any pre-existing
+            ;; installation. Backfill chunks for every existing target
+            ;; directly from the already-stored target rows (title/body/
+            ;; outline-path), with no need to re-read or re-parse the
+            ;; original Org files.
+            (org-glean--backfill-chunks db)
+            (sqlite-execute db "PRAGMA user_version = 3"))
           (sqlite-commit db)
           t)
       (error
        (sqlite-rollback db)
        (signal (car err) (cdr err))))))
+
+(defun org-glean--backfill-chunks (db)
+  "Populate `chunks' for every target in DB lacking one, grouped by source.
+Reconstructs the record plists `org-glean--chunk-records' expects directly
+from the `targets' table, so this never needs the original Org files."
+  (let ((by-path (make-hash-table :test #'equal)))
+    (dolist (row (sqlite-select
+                  db "SELECT key,path,kind,title,body,org_id,position,digest,capture_policy,level,outline_path,properties FROM targets ORDER BY path,position"))
+      (pcase-let ((`(,key ,path ,kind ,title ,body ,org-id ,position ,digest
+                     ,capture-policy ,level ,outline-path ,properties)
+                   (append row nil)))
+        (push (list :key key :path path :kind kind :title title :body body
+                   :org-id org-id :position position :digest digest
+                   :capture-policy capture-policy :level level
+                   :outline-path (and outline-path (not (string-empty-p outline-path))
+                                     (split-string outline-path "\x1f" t))
+                   :properties (org-glean--parse-properties properties))
+              (gethash path by-path))))
+    (maphash
+     (lambda (path records)
+       (let ((records (nreverse records)))
+         (dolist (chunk (org-glean--chunk-records records))
+           (sqlite-execute
+            db "INSERT OR REPLACE INTO chunks(key,target_key,path,ord,text,text_digest) VALUES(?,?,?,?,?,?)"
+            (vector (plist-get chunk :key) (plist-get chunk :target-key)
+                    path (plist-get chunk :ord) (plist-get chunk :text)
+                    (plist-get chunk :text-digest))))))
+     by-path)))
+
+
 
 (defun org-glean--db ()
   "Return the open database, checking required capabilities first."

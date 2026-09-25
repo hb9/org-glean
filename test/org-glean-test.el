@@ -143,6 +143,40 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (stringp (nth 2 row)))
         (should (equal (org-glean--chunk-digest (nth 2 row)) (nth 3 row)))))))
 
+(ert-deftest org-glean-test-migration-backfills-chunks-for-preexisting-targets ()
+  ;; Regression test for a real bug found on a real, pre-chunking corpus:
+  ;; the v1->v2 migration created the chunks/vectors tables but never
+  ;; populated chunks for targets that already existed. Reconcile's
+  ;; unchanged-source skip then means those sources are NEVER re-projected
+  ;; (their file digest never changes), so chunks stayed empty forever and
+  ;; semantic search silently found nothing on any pre-existing
+  ;; installation. Simulate that exact starting state: a schema-v2 database
+  ;; (chunks/vectors tables exist) with targets but zero chunk rows, then
+  ;; confirm opening it (which runs the v2->v3 backfill migration)
+  ;; populates chunks without needing any source file to change.
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root)
+                           "#+title: Old Corpus\n* Existing heading\nexisting body\n")
+    (org-glean-reconcile)
+    (let ((db (org-glean--db)))
+      ;; Simulate the incomplete v2 migration: chunks exist for this
+      ;; source right now (C1/C2 already populate them); wipe them and
+      ;; roll the schema version back to 2, exactly as a database migrated
+      ;; before the backfill fix would look.
+      (sqlite-execute db "DELETE FROM chunks")
+      (sqlite-execute db "PRAGMA user_version = 2")
+      (should (= 0 (caar (sqlite-select db "SELECT count(*) FROM chunks"))))
+      (org-glean-close)
+      (setq org-glean--database nil))
+    ;; Reopening the database (no file changes, no reconcile) must trigger
+    ;; the v2->v3 migration and backfill chunks from the stored targets.
+    (let* ((db (org-glean--db))
+           (chunks (sqlite-select db "SELECT key,target_key,text FROM chunks ORDER BY key")))
+      (should (= 3 (caar (sqlite-select db "PRAGMA user_version"))))
+      (should (= 2 (length chunks))) ; file record + one heading
+      (should (cl-some (lambda (row) (string-search "Existing heading" (nth 2 row))) chunks))
+      (should (cl-some (lambda (row) (string-search "existing body" (nth 2 row))) chunks)))))
+
 (ert-deftest org-glean-test-chunk-windows-splits-long-body-with-overlap ()
   (let* ((org-glean-chunk-max-chars 40)
          (org-glean-chunk-overlap-chars 10)

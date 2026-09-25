@@ -193,6 +193,26 @@ network and a real model, neither caught by the fake-embedder test suite:**
    an existing destination file before copying; covered by
    `test/test_download_script.py` (no network needed — it tests the copy
    helper directly, including the read-only-destination case).
+4. **Semantic search silently found nothing on a real, pre-existing
+   corpus.** The v1→v2 schema migration created the `chunks`/`vectors`
+   tables but never populated `chunks` for targets that already existed
+   at migration time — only `org-glean--replace` (added/changed sources)
+   writes chunk rows, and reconcile's unchanged-source skip means an
+   already-indexed, untouched source is *never* re-projected (its file
+   digest never changes). On a real corpus indexed before chunking
+   existed (confirmed on a live installation: 78 sources, 2926 targets,
+   0 chunks after a full reconcile), semantic search would have found
+   nothing forever, with no error to explain why. Fixed with a v2→v3
+   migration (`org-glean--backfill-chunks`) that reconstructs the record
+   plists `org-glean--chunk-records` expects directly from the already-
+   stored `targets` rows — no need to re-read or re-parse the original
+   Org files — and backfills chunks for every pre-existing target the
+   first time the database is opened after upgrading. Verified against a
+   copy of the real installation's database: 2926 targets correctly
+   produced 3176 chunks (some long headings split into multiple windowed
+   chunks). New regression test simulates the exact starting state (a
+   v2 database with targets but zero chunks) and confirms opening it
+   backfills correctly with no source file changes and no reconcile call.
 
 ## Phase 1.5 — Hybrid fusion and semantic-first interactive use (done)
 
