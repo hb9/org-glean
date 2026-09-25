@@ -98,7 +98,40 @@ set to nil to disable and bind `org-glean-command-map` yourself):
 Inside a results buffer: `s` toggles between the buffer's normal modes and
 semantic-only (and back), `e` expands/collapses grouped fuzzy hits, `g`
 refreshes, `TAB` previews, `RET` visits. The "Via" column shows which
-modes found each result (e.g. `sem+lex`).
+modes found each result (e.g. `sem+lex`); a semantic contribution's
+confidence shows as a rounded z-score (e.g. `sem6`), not a raw cosine
+number — see "Semantic ranking quality" below for what that means.
+
+### Semantic ranking quality
+
+A raw cosine similarity from a small embedding model like `e5-small`
+squashes almost every chunk into a narrow band (measured: 0.77–0.85
+against most queries on a real corpus), so the best match and the 500th
+are barely distinguishable, and a handful of generically-similar "hub"
+chunks (a link dump, a training-portal reference) can outrank the
+genuinely relevant one for unrelated queries. Two corrections, always
+applied together: mean-centering (subtract the corpus's own mean vector
+from every vector, including the query, before comparing) and a
+CSLS-style hub penalty (subtract each chunk's own mean similarity to its
+10 nearest neighbours, `org-glean-semantic-hub-lambda`, default 0.5).
+
+Results are then ranked by a z-score relative to the current query's own
+candidate pool — "notably better than typical for this query" rather than
+an absolute cosine cutoff, which measurement showed does not transfer
+across queries. `org-glean-semantic-min-z` (default 3.0) is the minimum
+z a hit must clear to be considered at all; `org-glean-semantic-max-hits`
+(default 10) caps how many semantic hits one query can contribute to
+fusion. A z-score is not meaningful with very few candidates (the best of
+2 candidates can never exceed z=1.0, by construction), so this threshold
+is automatically skipped below a minimum pool size rather than silently
+returning nothing for a small corpus or a narrowly root-filtered search.
+
+A query with no genuinely relevant chunk anywhere in the corpus can
+legitimately return few or no semantic results — that is z-scoring
+working as intended, not an error. See `ROADMAP.md`'s "Real-corpus
+semantic quality fixes" section for the measurements behind these
+defaults, and `org-knowledge/benchmarks/semantic-eval-v1.json` (a
+separate repository) for the regression set used to validate them.
 
 With `rhblind/emacs-mcp-server` installed, load `org-glean-mcp.el` to register
 the read-only `org-glean_search` tool. Set `org-glean-mcp-allowed-roots` to the

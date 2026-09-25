@@ -99,7 +99,14 @@ or when it is configured but the active model is not installed
 `provider-errors` — never silently dropped, never served from another
 provider's results. When the model is installed, `semantic` returns
 targets whose owning chunk best matches the query by embedding similarity,
-aggregated by max score per target. Every requested mode collects its own
+aggregated by max score per target, after mean-centering and a hub-
+similarity correction (`org-glean-semantic-hub-lambda`) and a z-score
+threshold relative to the query's own candidate pool
+(`org-glean-semantic-min-z`, `org-glean-semantic-max-hits`) — see
+README.md's "Semantic ranking quality" for why raw cosine similarity alone
+is not used. A semantic hit's fusion weight is itself scaled by its
+z-score, so a hit that only barely cleared the threshold contributes far
+less than a confident one. Every requested mode collects its own
 candidate pool independently (`org-glean-fusion-pool-size`, default 50) so
 one mode's result volume never crowds another out; candidates are then
 merged by target and ranked by weighted reciprocal-rank fusion
@@ -126,7 +133,7 @@ reported, never silently treated as applied.
  :outline-path STRING-LIST
  :properties PROPERTY-ALIST
  :match-type exact-or-lexical-or-fuzzy-or-semantic
- :modes ((MODE RANK RAW-SCORE) ...)
+ :modes ((MODE RANK RAW-SCORE Z-OR-NIL) ...)
  :score NUMBER
  :source-current BOOLEAN
  :rank INTEGER
@@ -138,7 +145,9 @@ reported, never silently treated as applied.
 `:match-type` is the single strongest contributor (by fusion weight); `:modes`
 lists every mode that found this target, each with its own 0-based RANK
 within that mode's candidate pool and a provider-specific RAW-SCORE (never
-compared across modes directly — only ranks feed the fusion formula).
+compared across modes directly — only ranks feed the fusion formula). Z is
+the semantic backend's z-score for a `semantic` entry (nil for every other
+mode); `:match-reason` renders it as e.g. `"semantic #1 z5.8"` when present.
 `:score` is the fused result across all contributing modes, not any one
 provider's raw relevance number. The current stable identity is `:org-id`
 when present; otherwise `:key` is snapshot-scoped. The current result-set

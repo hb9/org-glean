@@ -94,6 +94,7 @@ An empty value falls back to the configured Org Glean roots."
                    (property_key . ((type . "string")))
                    (property_value . ((type . "string")))
                    (modes . ((type . "array")
+                             (description . "Retrieval strategies to run, merged into one ranked list. \"semantic\" finds meaning-based matches with no shared words with the query and is usually the most useful mode for a topical question; omit this field entirely to use every mode the corpus currently supports.")
                              (items . ((type . "string")
                                        (enum . ["exact" "lexical" "fuzzy" "semantic"])))))))
     (required . ["query"]))
@@ -104,7 +105,7 @@ An empty value falls back to the configured Org Glean roots."
    :name "org-glean_search"
   :title "Search Org with Org Glean"
   :description
-   "Search configured Org roots with bounded exact, lexical, and fuzzy retrieval. Optional filters exclude property values, require exact metadata property pairs, cap heading depth, or omit titles. Returns provisional or Org-ID targets with file, outline path, score, reason, source freshness, a location link, and completeness/truncation metadata. This tool never modifies Org files. Use org-get-node to resolve/read a target before capture."
+   "Search configured Org roots with bounded exact, lexical, fuzzy AND semantic (meaning-based) retrieval; semantic search is this tool's main reason to exist, not an afterthought — it finds a target with no shared words with the query (e.g. querying \"food\" finds a recipe that never uses that word). Pass `modes' to select which retrieval strategies run (any of \"exact\", \"lexical\", \"fuzzy\", \"semantic\"); omit it to get every mode the corpus currently supports, semantic included once a model is installed. Results from every requested mode are merged into one ranked list; each result's `match-reason' names its best-scoring mode(s) and, for a semantic contribution, a z-score (e.g. \"semantic #1 z5.8\") — roughly, how much better this match is than a typical candidate for this query, not an absolute similarity number. A query with no strong match anywhere in the corpus can legitimately return few or no results; that is a correct answer, not a sign to keep guessing at rephrasing it. Optional filters exclude property values, require exact metadata property pairs, cap heading depth, or omit titles. Returns provisional or Org-ID targets with file, outline path, score, reason, source freshness, a location link, and completeness/truncation metadata. This tool never modifies Org files. Use org-get-node to resolve/read a target before capture."
    :input-schema org-glean-mcp--input-schema
   :function #'org-glean-mcp--handler
   :annotations '((readOnlyHint . t)
