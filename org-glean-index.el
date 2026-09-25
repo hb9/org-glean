@@ -222,8 +222,21 @@ reported and preserved; a failed tree walk never deletes indexed sources."
                        :semantic-queue-state org-glean--semantic-queue-state
                        :errors (copy-tree org-glean--last-errors))))
     (when (called-interactively-p 'interactive)
-      (message "org-glean: %S" status))
+      (message "org-glean: %s" (org-glean--status-summary status)))
     status))
+
+(defun org-glean--status-summary (status)
+  "Return a one-line human-readable summary of STATUS."
+  (let ((semantic (pcase (plist-get status :semantic-state)
+                    ('ready (format "semantic ready (%s) %d/%d embedded, queue %s"
+                                    (plist-get status :semantic-model)
+                                    (or (plist-get status :semantic-coverage-chunks) 0)
+                                    (or (plist-get status :semantic-coverage-total) 0)
+                                    (plist-get status :semantic-queue-state)))
+                    ('not-installed (format "semantic not installed (%s)"
+                                           (plist-get status :semantic-model)))
+                    (_ "semantic unavailable"))))
+    (format "%s | %s" (plist-get status :state) semantic)))
 
 (defun org-glean-show-errors ()
   "Display the latest reconciliation and search-provider errors."

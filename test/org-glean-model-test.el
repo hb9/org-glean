@@ -92,5 +92,34 @@
       (should (= 0 (length (alist-get 'provider-errors response))))
       (should (> (alist-get 'candidate-count response) 0)))))
 
+(ert-deftest org-glean-model-test-hybrid-fusion-combines-lexical-and-semantic ()
+  ;; A target that matches both lexically (shares the literal query words)
+  ;; and semantically (the real e5-small model rates it topically close)
+  ;; must fuse both contributions into one result that outranks a target
+  ;; found only weakly by semantic search alone. This does NOT test whether
+  ;; fusion can override a genuinely better-matching lexical decoy - an
+  ;; earlier version of this test tried exactly that and failed for the
+  ;; right reason: the "decoy" text turned out to be a legitimately closer
+  ;; match by both signals, which is correct behavior, not a bug. Rank
+  ;; fusion combines evidence; it does not manufacture relevance evidence
+  ;; that a real embedding model does not itself produce.
+  (org-glean-model-test--corpus
+    (org-glean-model-test--write
+     (expand-file-name "methodology.org" root)
+     "#+title: Finance Glossary\n* Revenue trend measurement methodology\nThis note describes how our finance team defines and computes the revenue trend metric used in board meetings.\n")
+    (org-glean-model-test--write
+     (expand-file-name "sales.org" root)
+     "#+title: Sales\n* Quarterly sales figures\nOur income grew substantially this quarter across every region we operate in.\n")
+    (org-glean-reconcile)
+    (org-glean-model-test--drain-queue)
+    (let* ((response (org-glean-search-api "revenue trend" 5 nil nil
+                                           '(exact lexical fuzzy semantic)))
+           (results (append (alist-get 'results response) nil))
+           (top (car results)))
+      (should top)
+      (should (equal "Revenue trend measurement methodology" (alist-get :title top)))
+      (should (cl-some (lambda (m) (eq 'lexical (car m))) (alist-get :modes top)))
+      (should (cl-some (lambda (m) (eq 'semantic (car m))) (alist-get :modes top))))))
+
 (provide 'org-glean-model-test)
 ;;; org-glean-model-test.el ends here

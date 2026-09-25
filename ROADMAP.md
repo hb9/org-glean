@@ -194,14 +194,75 @@ network and a real model, neither caught by the fake-embedder test suite:**
    `test/test_download_script.py` (no network needed — it tests the copy
    helper directly, including the read-only-destination case).
 
-## Phase 2 — Hybrid quality
+## Phase 1.5 — Hybrid fusion and semantic-first interactive use (done)
 
-- Weighted reciprocal-rank fusion across exact/lexical/fuzzy/semantic, with
-  exact ID/title pinned above the fused order; tune weights against the
-  judged set from phase 1.
+Landed ahead of phase 2's original schedule, once real-model validation
+(above) showed the foundation was solid enough to build on:
+
+- [x] **Weighted reciprocal-rank fusion** (`org-glean-search.el`). Every
+      requested mode collects its own candidate pool independently
+      (`org-glean-fusion-pool-size`, default 50) instead of lexical results
+      consuming the limit before semantic/fuzzy get a chance; candidates
+      are merged by target key (`:modes` lists every contributing mode
+      with its rank and raw score) and ranked by
+      `weight/(k+rank+1)` summed per mode (`org-glean-fusion-weights`:
+      exact 1.0, semantic 1.0, lexical 0.8, fuzzy 0.3; `org-glean-fusion-k`
+      60). An exact match is pinned above the fused order; ties break by
+      fused score then best contributing rank, so ordering is
+      deterministic for a given generation and query. Real caught bug: the
+      merge step discarded `:source-current` on every item because a
+      helper adding a *new* alist key was called only for its side effect
+      instead of its return value being captured — a fresh regression test
+      now locks this in.
+- [x] **Semantic on by default once installed** (`org-glean--default-modes`,
+      overridable via `org-glean-default-modes`): `org-glean-find`,
+      `org-glean-search-buffer` and MCP now request
+      `(exact lexical fuzzy semantic)` automatically once
+      `org-glean-embed-available-p` is true, `(exact lexical fuzzy)`
+      otherwise. `org-glean-search-api`'s own low-level default is
+      unchanged, so existing programmatic callers are unaffected.
+- [x] **Semantic-only commands and results UI**: `org-glean-find-semantic`,
+      `org-glean-search-buffer-semantic` (force `(semantic)` modes; signal
+      a clear `user-error` pointing at `M-x org-glean-install` rather than
+      returning nothing if not installed); the results buffer remembers
+      its modes across `g` refresh, toggles to/from semantic-only with
+      `s`, gains a "Via" column showing contributing modes, and its header
+      line reports active modes and semantic coverage.
+- [x] **Default key bindings** under `org-glean-keymap-prefix` (default
+      `M-s g`, confirmed unbound by Emacs/`search-map` by default; nil
+      disables the binding): `g`/`G` normal find/search-buffer, `s`/`S`
+      semantic-only, `r` reconcile, `i` status, `e` show-errors, `p`
+      `org-glean-semantic-toggle` (new: pause the embedding queue if
+      running, resume if paused).
+- [x] **`org-glean-status` gains a one-line interactive summary**
+      (`org-glean--status-summary`), e.g. `ready | semantic ready
+      (e5-small) 812/1040 embedded, queue idle`.
+- [x] **Hybrid real-model test** (`make test-model`): a target matching
+      both lexically and semantically fuses both contributions and
+      outranks a weaker semantic-only match. An earlier version of this
+      test tried to make fusion override a genuinely better-matching
+      lexical/semantic "decoy" and correctly failed — rank fusion combines
+      real evidence, it does not manufacture relevance a model does not
+      itself produce; the test was rewritten to assert something fusion
+      actually guarantees.
+
+89 ERT tests pass (was 71 before this phase), 5 real-model tests pass,
+every module still byte-compiles clean.
+
+Explicitly deferred to phase 2: caller-selected chunk/heading/file
+granularity (a semantic hit still resolves to its exact owning target
+only), and tuning `org-glean-fusion-weights`/`-k` against a judged query
+set (they are reasonable literature defaults, not yet validated against
+this corpus's actual retrieval quality).
+
+## Phase 2 — Further hybrid quality
+
+- Tune `org-glean-fusion-weights`/`org-glean-fusion-k` against a judged
+  query set once one exists, rather than relying on literature defaults.
 - Chunk-window and outline-path passage tuning informed by real misses.
 - File- and heading-suggestion quality as a first-class evaluation target,
-  not a side effect of chunk-level scoring.
+  not a side effect of chunk-level scoring — including caller-selected
+  chunk/heading/file result granularity.
 
 ## Phase 3 — Agents
 

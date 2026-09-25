@@ -99,12 +99,16 @@ or when it is configured but the active model is not installed
 `provider-errors` — never silently dropped, never served from another
 provider's results. When the model is installed, `semantic` returns
 targets whose owning chunk best matches the query by embedding similarity,
-aggregated by max score per target (see `ROADMAP.md` phase 1 for the
-chunk-to-target aggregation and phase 2 for planned chunk/heading/file
-granularity and calibrated rank fusion; today, ordering across modes is
-still priority-tier: exact, then lexical, then semantic, then fuzzy).
-Unsupported modes or filter operators must be reported, never silently
-treated as applied.
+aggregated by max score per target. Every requested mode collects its own
+candidate pool independently (`org-glean-fusion-pool-size`, default 50) so
+one mode's result volume never crowds another out; candidates are then
+merged by target and ranked by weighted reciprocal-rank fusion
+(`org-glean-fusion-weights`, `org-glean-fusion-k`) — exact matches are
+pinned above the fused order, ties broken by fused score then best
+contributing rank, so ordering is deterministic for a given generation and
+query. Chunk/heading/file caller-selected granularity remains planned
+(`ROADMAP.md` phase 2). Unsupported modes or filter operators must be
+reported, never silently treated as applied.
 
 ### Result (current API v1)
 
@@ -122,6 +126,7 @@ treated as applied.
  :outline-path STRING-LIST
  :properties PROPERTY-ALIST
  :match-type exact-or-lexical-or-fuzzy-or-semantic
+ :modes ((MODE RANK RAW-SCORE) ...)
  :score NUMBER
  :source-current BOOLEAN
  :rank INTEGER
@@ -130,14 +135,20 @@ treated as applied.
  :link STRING)
 ```
 
-The current stable identity is `:org-id` when present; otherwise `:key` is
-snapshot-scoped. The current result-set schema is versioned at the outer level;
-result items do not yet have their own schema-version field. A link is a
-navigation hint, not permission to bypass freshness/ambiguity checks. Backends
-should map this row-compatible v1 representation to the canonical source/target
-port types during the planned extraction. Planned phase 1 additions: a
-`:granularity` value (`chunk`/`heading`/`file`) and a list of all contributing
-modes per result, not just the top `:match-type` (see `ROADMAP.md` phase 1–2).
+`:match-type` is the single strongest contributor (by fusion weight); `:modes`
+lists every mode that found this target, each with its own 0-based RANK
+within that mode's candidate pool and a provider-specific RAW-SCORE (never
+compared across modes directly — only ranks feed the fusion formula).
+`:score` is the fused result across all contributing modes, not any one
+provider's raw relevance number. The current stable identity is `:org-id`
+when present; otherwise `:key` is snapshot-scoped. The current result-set
+schema is versioned at the outer level; result items do not yet have their
+own schema-version field. A link is a navigation hint, not permission to
+bypass freshness/ambiguity checks. Backends should map this row-compatible
+v1 representation to the canonical source/target port types during the
+planned extraction. Planned phase 2 addition: a `:granularity` value
+(`chunk`/`heading`/`file`).
+
 
 ### Result set
 
@@ -218,8 +229,10 @@ extracted.
                                               ; -> versioned result-set alist
 (org-glean-open-result RESULT &optional PREVIEW) ; -> source buffer
 (org-glean-visit RESULT)                      ; -> source buffer
-(org-glean-search-buffer QUERY &optional FILTERS) ; -> results buffer
+(org-glean-search-buffer QUERY &optional FILTERS MODES) ; -> results buffer
+(org-glean-search-buffer-semantic QUERY &optional FILTERS) ; -> results buffer, semantic-only
 (org-glean-find QUERY)                        ; -> selected result / quit value
+(org-glean-find-semantic QUERY)               ; -> selected result / quit value, semantic-only
 (org-glean-start)                             ; -> nil; idempotently enable updates
 (org-glean-stop)                              ; -> nil; disable updates
 (org-glean-close)                             ; -> nil; close disposable index
@@ -232,7 +245,18 @@ extracted.
                                                ;    embedding queue is running
 (org-glean-semantic-pause)                    ; -> nil; stop the queue
 (org-glean-semantic-resume)                   ; -> nil; restart the queue
+(org-glean-semantic-toggle)                   ; -> nil; pause if running, resume if paused
 ```
+
+`org-glean-find`/`org-glean-search-buffer` use `org-glean--default-modes` when
+MODES is omitted: `(exact lexical fuzzy semantic)` once a semantic backend is
+installed for the active model, otherwise `(exact lexical fuzzy)`. The
+`-semantic` variants force `(semantic)` and signal a `user-error` pointing at
+`M-x org-glean-install` if the model is not installed, rather than returning
+an empty result silently. `org-glean-default-modes` overrides the automatic
+choice for all of these (and for MCP); it does not affect `org-glean-search-api`'s
+own lower-level default, which callers of the application API can still rely
+on unchanged.
 
 `org-glean-install` is interactive-first (prompts for PRESET via
 `completing-read` over the presets in `semantic/presets.json`), asks for one
