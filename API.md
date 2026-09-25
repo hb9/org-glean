@@ -61,9 +61,9 @@ index. Source replacement and removal are source-owned operations.
 ```elisp
 (:schema-version 1
  :text STRING
- :modes (exact lexical fuzzy ...)
+ :modes (exact lexical fuzzy semantic)  ; semantic is reserved: see below
  :roots ROOT-ID-LIST         ; nil means configured roots for local Lisp calls
- :kinds (file heading ...)
+ :kinds (file heading ...)   ; planned phase 1: chunk granularity selector
  :filters FILTER-PLIST
  :limit INTEGER
  :purpose SYMBOL-OR-NIL)
@@ -71,8 +71,12 @@ index. Source replacement and removal are source-owned operations.
 
 Generic filters include `:allowed-roots`, `:exclude-property-values`,
 `:property-equals`, `:max-heading-level`, and `:exclude-titles`. They are applied
-before the caller-visible result limit. Unsupported modes or filter operators
-must be reported, never silently treated as applied.
+before the caller-visible result limit. `semantic` is an implemented mode name
+in the request/response contract, but no semantic provider ships yet:
+requesting it is honestly reported as unavailable via `provider-errors`
+(`org-glean-semantic-provider` defaults to nil). See `ROADMAP.md` phase 1 for
+the planned chunk-based semantic backend. Unsupported modes or filter
+operators must be reported, never silently treated as applied.
 
 ### Result (current API v1)
 
@@ -89,7 +93,7 @@ must be reported, never silently treated as applied.
  :level INTEGER
  :outline-path STRING-LIST
  :properties PROPERTY-ALIST
- :match-type exact-or-lexical-or-fuzzy
+ :match-type exact-or-lexical-or-fuzzy-or-semantic
  :score NUMBER
  :source-current BOOLEAN
  :rank INTEGER
@@ -103,7 +107,9 @@ snapshot-scoped. The current result-set schema is versioned at the outer level;
 result items do not yet have their own schema-version field. A link is a
 navigation hint, not permission to bypass freshness/ambiguity checks. Backends
 should map this row-compatible v1 representation to the canonical source/target
-port types during the planned extraction.
+port types during the planned extraction. Planned phase 1 additions: a
+`:granularity` value (`chunk`/`heading`/`file`) and a list of all contributing
+modes per result, not just the top `:match-type` (see `ROADMAP.md` phase 1–2).
 
 ### Result set
 
@@ -113,7 +119,7 @@ The structured search API returns an alist with these fields:
 | --- | --- |
 | `schema-version` | Result-set schema; currently `1`. |
 | `query` | Original query string. |
-| `requested` | Modes and whether generic filters were requested. |
+| `requested` | Alist of requested mode to `t`, one entry per requested provider mode. |
 | `used` | Providers completed successfully; failed providers are listed separately. |
 | `degraded` | `:false`, `incomplete` for exhausted work budget, or `provider-error` when one or more requested providers failed. |
 | `freshness` | `stale-source-present`, `index-checked`, or `sources-checked-current`. |
@@ -135,10 +141,14 @@ the remaining work budget permits.
 ### Status and error
 
 Status values use `(:schema-version 1 :state STATE ...)`, where `STATE` is one
-of `ready`, `indexing`, `degraded`, or `unavailable`. Optional fields report
-configured roots, indexed source/target counts, last reconciliation time,
-provider capabilities, and a diagnostic message. Status inspection is
-read-only.
+of `ready`, `degraded`, or `unavailable` (`indexing` is reserved for a planned
+asynchronous reconciliation path; the current synchronous
+`org-glean-reconcile` runs to completion before returning). Optional fields
+report configured roots, indexed source/target counts, last reconciliation
+time and counts, recorded errors, and `:semantic-state` (currently always
+`unavailable`; see `ROADMAP.md` phase 1). Status inspection is read-only.
+`org-glean-show-errors` renders the same reconciliation and search-provider
+failures in a dedicated buffer.
 
 Errors are conditions, not result-set states. The v1 condition families are:
 
@@ -164,7 +174,7 @@ extracted.
 (org-glean-update-file PATH)                  ; -> t if selected, nil otherwise
 (org-glean-search-exact TITLE &optional LIMIT) ; -> result plist list
 (org-glean-search QUERY &optional LIMIT FUZZY) ; -> result plist list
-(org-glean-search-api QUERY &optional LIMIT FUZZY FILTERS)
+(org-glean-search-api QUERY &optional LIMIT FUZZY FILTERS MODES)
                                               ; -> versioned result-set alist
 (org-glean-open-result RESULT &optional PREVIEW) ; -> source buffer
 (org-glean-visit RESULT)                      ; -> source buffer
@@ -173,7 +183,13 @@ extracted.
 (org-glean-start)                             ; -> nil; idempotently enable updates
 (org-glean-stop)                              ; -> nil; disable updates
 (org-glean-close)                             ; -> nil; close disposable index
+(org-glean-status)                            ; -> versioned status plist
+(org-glean-show-errors)                       ; -> diagnostic buffer
 ```
+
+MODES, when non-nil, is a list among `exact`, `lexical`, `fuzzy` and
+`semantic`; it defaults to `(exact lexical)`, with FUZZY as a legacy
+shorthand for adding `fuzzy`.
 
 `org-glean-search-api` accepts these filter plist keys:
 
@@ -189,16 +205,18 @@ The optional `:allowed-roots` value is fail-closed when explicitly supplied as
 an empty list. When omitted from a local Lisp call, configured `org-glean-roots`
 govern search. MCP always requires a non-empty explicit allowed-root set.
 
-### Planned lifecycle and diagnostics entry points
+### Planned entry points
 
-These names are reserved by the application contract but are not implemented in
-the first slice:
+`org-glean-status` and `org-glean-show-errors` are implemented (see above).
+These names are reserved by the application contract but not yet
+implemented:
 
 ```elisp
-(org-glean-status)                            ; -> versioned status plist
 (org-glean-rebuild &optional ROOT-IDS)         ; -> reconciliation count plist
 (org-glean-resolve IDENTITY)                  ; -> current result or condition
-(org-glean-show-errors)                       ; -> diagnostic buffer
+(org-glean-install &optional MODEL-PRESET)    ; -> phase 1: managed semantic
+                                               ;    backend setup with consent
+(org-glean-semantic-status)                   ; -> phase 1: per-model coverage
 ```
 
 New public operations require a contract test and must preserve the guarantees
