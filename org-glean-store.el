@@ -31,7 +31,9 @@
 (defun org-glean--migrate-database (db)
   "Migrate DB from the original lexical schema to current schema.
 Rebuild the external-content FTS table only once when upgrading databases
-created before migration version 1; healthy opens do not rewrite the index."
+created before migration version 1; healthy opens do not rewrite the index.
+Schema version 2 adds `chunks' and `vectors' for per-chunk, content-keyed
+semantic materialization; it never touches `targets' or `sources'."
   (let ((version (or (caar (sqlite-select db "PRAGMA user_version")) 0)))
     (sqlite-transaction db)
     (condition-case err
@@ -53,6 +55,18 @@ created before migration version 1; healthy opens do not rewrite the index."
             ;; index. Repair once as part of migration, not on every connection.
             (sqlite-execute db "INSERT INTO target_fts(target_fts) VALUES('rebuild')")
             (sqlite-execute db "PRAGMA user_version = 1"))
+          (when (< version 2)
+            ;; Chunks are content-owned by their source and rewritten wholesale
+            ;; on every `org-glean--replace'. Vectors are keyed on (model,
+            ;; text digest) alone, so they are never deleted by a source
+            ;; replace/remove: an unchanged passage keeps its vector across
+            ;; reprojection, a move, or even a full reconciliation rebuild.
+            (sqlite-execute db "CREATE TABLE IF NOT EXISTS chunks (key TEXT PRIMARY KEY, target_key TEXT NOT NULL, path TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, text_digest TEXT NOT NULL, FOREIGN KEY(path) REFERENCES sources(path))")
+            (sqlite-execute db "CREATE INDEX IF NOT EXISTS chunks_path ON chunks(path)")
+            (sqlite-execute db "CREATE INDEX IF NOT EXISTS chunks_target ON chunks(target_key)")
+            (sqlite-execute db "CREATE INDEX IF NOT EXISTS chunks_digest ON chunks(text_digest)")
+            (sqlite-execute db "CREATE TABLE IF NOT EXISTS vectors (model_id TEXT NOT NULL, text_digest TEXT NOT NULL, dim INTEGER NOT NULL, vector BLOB NOT NULL, PRIMARY KEY (model_id, text_digest))")
+            (sqlite-execute db "PRAGMA user_version = 2"))
           (sqlite-commit db)
           t)
       (error
@@ -86,12 +100,28 @@ created before migration version 1; healthy opens do not rewrite the index."
     (sqlite-close org-glean--database)
     (setq org-glean--database nil org-glean--database-path nil)))
 
+(defun org-glean--chunk-text (record)
+  "Return the passage text embedded for RECORD.
+This is the naive, single-chunk-per-target passage: title and body verbatim.
+Windowed, outline-aware chunking (multiple chunks for a long body, file-level
+outline context) is planned; see ROADMAP.md phase 1."
+  (string-join (delq nil (list (plist-get record :title) (plist-get record :body))) "\n"))
+
+(defun org-glean--chunk-digest (text)
+  "Return the content digest for chunk TEXT, keying its vector cache entry."
+  (secure-hash 'sha256 (encode-coding-string (string-trim text) 'utf-8)))
+
 (defun org-glean--replace (db path root digest records)
-  "Atomically replace PATH owned by ROOT with DIGEST and RECORDS in DB."
+  "Atomically replace PATH owned by ROOT with DIGEST and RECORDS in DB.
+Each record's chunk rows are rewritten too. Chunk keys are per-target and are
+freely deleted and recreated; vectors are keyed on content digest alone and
+are never touched here, so an unchanged passage keeps its vector across this
+replacement."
   (sqlite-transaction db)
   (condition-case err
       (progn
         (sqlite-execute db "DELETE FROM targets WHERE path = ?" (vector path))
+        (sqlite-execute db "DELETE FROM chunks WHERE path = ?" (vector path))
         (sqlite-execute db "INSERT OR REPLACE INTO sources(path,root,digest) VALUES(?,?,?)"
                         (vector path root digest))
         (dolist (record records)
@@ -102,11 +132,26 @@ created before migration version 1; healthy opens do not rewrite the index."
                                   (or (plist-get record :capture-policy) "eligible")
                                   (or (plist-get record :level) 0)
                                   (mapconcat #'identity (plist-get record :outline-path) "\x1f")
-                                  (org-glean--sql-properties (plist-get record :properties)))))
+                                  (org-glean--sql-properties (plist-get record :properties))))
+          (let ((text (org-glean--chunk-text record)))
+            (unless (string-empty-p (string-trim text))
+              (sqlite-execute db "INSERT INTO chunks(key,target_key,path,ord,text,text_digest) VALUES(?,?,?,?,?,?)"
+                              (vector (concat (plist-get record :key) "#chunk:0")
+                                      (plist-get record :key) path 0 text
+                                      (org-glean--chunk-digest text))))))
         (unless (equal digest (org-glean--digest path))
           (error "Source changed before replacement committed"))
         (sqlite-commit db))
     (error (sqlite-rollback db) (signal (car err) (cdr err)))))
+
+(defun org-glean--semantic-coverage (db model-id)
+  "Return (COVERED . TOTAL) chunks with a vector for MODEL-ID in DB."
+  (let ((total (or (caar (sqlite-select db "SELECT count(*) FROM chunks")) 0))
+        (covered (or (caar (sqlite-select
+                            db "SELECT count(*) FROM chunks c JOIN vectors v ON v.text_digest = c.text_digest AND v.model_id = ?"
+                            (vector model-id)))
+                     0)))
+    (cons covered total)))
 
 (defun org-glean--results (rows)
   "Turn ROWS into typed result property lists."

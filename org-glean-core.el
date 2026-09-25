@@ -61,6 +61,14 @@ rather than silently dropped or served from another provider."
   :type '(choice (const :tag "Unavailable" nil) function)
   :group 'org-glean)
 
+(defcustom org-glean-semantic-model "e5-small"
+  "Active semantic model preset name.
+Chunk vectors are keyed on this identifier, so switching presets never
+invalidates other presets' cached vectors; it only changes which are
+consulted. See ROADMAP.md phase 1 for the preset table and backend."
+  :type 'string
+  :group 'org-glean)
+
 (defvar org-glean--last-search-completeness 'complete)
 
 (defvar org-glean--last-search-examined 0)

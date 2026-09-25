@@ -81,6 +81,7 @@ reported and preserved; a failed tree walk never deletes indexed sources."
         (condition-case err
             (progn
               (sqlite-execute db "DELETE FROM targets WHERE path=?" (vector (car row)))
+              (sqlite-execute db "DELETE FROM chunks WHERE path=?" (vector (car row)))
               (sqlite-execute db "DELETE FROM sources WHERE path=?" (vector (car row)))
               (sqlite-commit db)
               (cl-incf (plist-get counts :removed)))
@@ -136,6 +137,7 @@ reported and preserved; a failed tree walk never deletes indexed sources."
             (let ((db (org-glean--db)))
               (sqlite-transaction db)
               (sqlite-execute db "DELETE FROM targets WHERE path=?" (vector path))
+              (sqlite-execute db "DELETE FROM chunks WHERE path=?" (vector path))
               (sqlite-execute db "DELETE FROM sources WHERE path=?" (vector path))
               (sqlite-commit db)))
         (error (message "org-glean: save update failed for %s: %s"
@@ -191,6 +193,8 @@ reported and preserved; a failed tree walk never deletes indexed sources."
                    (let ((db (org-glean--db)))
                      (list :sources (or (caar (sqlite-select db "SELECT count(*) FROM sources")) 0)
                            :targets (or (caar (sqlite-select db "SELECT count(*) FROM targets")) 0)))))
+         (coverage (when database-available
+                     (org-glean--semantic-coverage (org-glean--db) org-glean-semantic-model)))
          (state (cond ((null org-glean-roots) 'unavailable)
                       ((or (plist-get org-glean--last-reconcile-counts :scan-error)
                            org-glean--last-errors)
@@ -205,7 +209,10 @@ reported and preserved; a failed tree walk never deletes indexed sources."
                        :indexed-targets (plist-get counts :targets)
                        :last-reconcile-at org-glean--last-reconcile-at
                        :last-reconcile-counts org-glean--last-reconcile-counts
-                       :semantic-state 'unavailable
+                       :semantic-state (if org-glean-semantic-provider 'ready 'unavailable)
+                       :semantic-model org-glean-semantic-model
+                       :semantic-coverage-chunks (car coverage)
+                       :semantic-coverage-total (cdr coverage)
                        :errors (copy-tree org-glean--last-errors))))
     (when (called-interactively-p 'interactive)
       (message "org-glean: %S" status))

@@ -56,6 +56,24 @@ empty list selects every `.org` file under the root before excludes are applied.
 The fingerprint describes the exact saved source snapshot projected into the
 index. Source replacement and removal are source-owned operations.
 
+### Chunk (schema v2, storage-internal)
+
+Not yet part of the public value contract, but the storage foundation phase 1
+builds on:
+
+```sql
+chunks(key, target_key, path, ord, text, text_digest)
+vectors(model_id, text_digest, dim, vector)
+```
+
+A chunk is one embeddable passage owned by a target (currently one
+title+body chunk per target; windowed multi-chunk passages are planned). A
+vector is keyed on `(model_id, text_digest)` alone, never on a chunk or
+target key, so it survives reprojection, moves, and even a full
+reconciliation rebuild of an otherwise-unchanged passage.
+`org-glean--replace` rewrites a source's `chunks` rows wholesale on every
+change; it never deletes or writes `vectors`.
+
 ### Query
 
 ```elisp
@@ -145,8 +163,14 @@ of `ready`, `degraded`, or `unavailable` (`indexing` is reserved for a planned
 asynchronous reconciliation path; the current synchronous
 `org-glean-reconcile` runs to completion before returning). Optional fields
 report configured roots, indexed source/target counts, last reconciliation
-time and counts, recorded errors, and `:semantic-state` (currently always
-`unavailable`; see `ROADMAP.md` phase 1). Status inspection is read-only.
+time and counts, and recorded errors. `:semantic-state` is `ready` when
+`org-glean-semantic-provider` is configured, `unavailable` otherwise (no
+provider ships yet; see `ROADMAP.md` phase 1). `:semantic-model` names the
+active preset (`org-glean-semantic-model`, default `"e5-small"`).
+`:semantic-coverage-chunks`/`:semantic-coverage-total` report how many of the
+index's chunks have a vector for the active model — a per-chunk fact, never
+a single global stale/fresh flag, so one save never invalidates semantic
+search for the rest of the corpus. Status inspection is read-only.
 `org-glean-show-errors` renders the same reconciliation and search-provider
 failures in a dedicated buffer.
 

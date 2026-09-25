@@ -22,19 +22,24 @@ modules before adding new capability.
       `org-glean-semantic-provider` hook, nil by default).
 - [x] Rewrite `DESIGN.md`, `ROADMAP.md` (this file) and `API.md` around the
       semantic-first vision.
-- [ ] Split `org-glean.el` into modules with no behaviour change:
+- [x] Split `org-glean.el` into modules with no behaviour change:
       `org-glean-core`, `-project`, `-store`, `-index`, `-search`, `-ui`,
       `-mcp`, with `org-glean.el` as a thin entry point. Add a `Makefile`
       with `test`/`compile`/`clean` targets.
 
 **Exit:** same ERT count green, each module byte-compiles warning-free,
 `emacs -Q -l org-glean.el` loads cleanly, MCP tool registers, worktree clean.
+Met.
 
 ## Phase 1 — Semantic MVP, end to end
 
-- Store schema v2: `chunks` and `vectors` tables, content-keyed by
-  `(model_id, text_digest)`; coverage computed as a per-chunk fact, not a
-  global generation digest.
+- [x] Store schema v2: `chunks` and `vectors` tables, content-keyed by
+      `(model_id, text_digest)`; coverage computed as a per-chunk fact, not a
+      global generation digest. `org-glean--replace` rewrites a source's
+      chunks wholesale but never touches `vectors`, so an unchanged passage
+      keeps its vector across reprojection. Chunking is still naive
+      (title+body verbatim, one chunk per target); windowed, outline-aware
+      passages are the next step below.
 - Chunking: file-level and heading-level passages with outline-path context,
   windowed body text (~350–400 tokens, paragraph-aligned, overlapping) so no
   content is silently truncated.

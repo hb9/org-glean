@@ -89,7 +89,50 @@
       (should (eq 'ready (plist-get status :state)))
       (should (= 1 (plist-get status :indexed-sources)))
       (should (= 2 (plist-get status :indexed-targets)))
-      (should (plist-get status :last-reconcile-at)))))
+      (should (plist-get status :last-reconcile-at))
+      (should (eq 'unavailable (plist-get status :semantic-state)))
+      (should (equal "e5-small" (plist-get status :semantic-model)))
+      (should (= 0 (plist-get status :semantic-coverage-chunks)))
+      (should (= 2 (plist-get status :semantic-coverage-total))))))
+
+(ert-deftest org-glean-test-reconcile-populates-chunks ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "chunk.org" root)
+                           "#+title: Chunked\n* Heading one\nbody text one\n* Heading two\nbody text two\n")
+    (org-glean-reconcile)
+    (let* ((db (org-glean--db))
+           (chunks (sqlite-select db "SELECT key,target_key,text,text_digest FROM chunks ORDER BY key")))
+      ;; One chunk per target: the file record plus each of the two headings.
+      (should (= 3 (length chunks)))
+      (dolist (row chunks)
+        (should (equal (concat (nth 1 row) "#chunk:0") (nth 0 row)))
+        (should (stringp (nth 2 row)))
+        (should (equal (org-glean--chunk-digest (nth 2 row)) (nth 3 row)))))))
+
+(ert-deftest org-glean-test-unchanged-reconcile-keeps-chunk-vector ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "vector.org" root) "* Stable heading\nstable body\n")
+    (org-glean-reconcile)
+    (let* ((db (org-glean--db))
+           (digest (caar (sqlite-select
+                          db "SELECT text_digest FROM chunks WHERE target_key LIKE '%heading%' LIMIT 1"))))
+      (sqlite-execute db "INSERT INTO vectors(model_id,text_digest,dim,vector) VALUES(?,?,?,?)"
+                      (vector "fixture-model" digest 3 (unibyte-string 0 0 0)))
+      (should (equal (cons 1 2) (org-glean--semantic-coverage db "fixture-model")))
+      ;; Reconcile again with nothing changed; the vector must survive because
+      ;; org-glean--replace never touches `vectors', only `chunks'.
+      (org-glean-reconcile)
+      (should (equal (cons 1 2) (org-glean--semantic-coverage db "fixture-model"))))))
+
+(ert-deftest org-glean-test-removed-source-deletes-its-chunks ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "removeme.org" root)))
+      (org-glean-test--write path "* Doomed\nbody\n")
+      (org-glean-reconcile)
+      (should (> (caar (sqlite-select (org-glean--db) "SELECT count(*) FROM chunks")) 0))
+      (delete-file path)
+      (org-glean-reconcile)
+      (should (= 0 (caar (sqlite-select (org-glean--db) "SELECT count(*) FROM chunks")))))))
 
 (ert-deftest org-glean-test-status-reports-degraded-root-configuration ()
   (org-glean-test--corpus
