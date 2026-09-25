@@ -90,20 +90,35 @@ An empty INCLUDES list accepts every .org file."
               available))))
 
 (defun org-glean--migrate-database (db)
-  "Migrate DB from the original lexical schema to current schema."
-  (sqlite-execute db "CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, root TEXT NOT NULL, digest TEXT NOT NULL)")
-  (sqlite-execute db "CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, org_id TEXT, position INTEGER NOT NULL, digest TEXT NOT NULL, capture_policy TEXT NOT NULL DEFAULT 'eligible', level INTEGER NOT NULL DEFAULT 0, outline_path TEXT NOT NULL DEFAULT '', properties TEXT NOT NULL DEFAULT 'nil', FOREIGN KEY(path) REFERENCES sources(path))")
-  (dolist (migration '("ALTER TABLE targets ADD COLUMN capture_policy TEXT NOT NULL DEFAULT 'eligible'"
-                       "ALTER TABLE targets ADD COLUMN level INTEGER NOT NULL DEFAULT 0"
-                       "ALTER TABLE targets ADD COLUMN outline_path TEXT NOT NULL DEFAULT ''"
-                       "ALTER TABLE targets ADD COLUMN properties TEXT NOT NULL DEFAULT 'nil'"))
-    (condition-case nil (sqlite-execute db migration) (error nil)))
-  (sqlite-execute db "CREATE INDEX IF NOT EXISTS targets_path ON targets(path)")
-  (sqlite-execute db "CREATE INDEX IF NOT EXISTS targets_title ON targets(title)")
-  (sqlite-execute db "CREATE VIRTUAL TABLE IF NOT EXISTS target_fts USING fts5(title, body, content='targets', content_rowid='rowid')")
-  (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS targets_ai AFTER INSERT ON targets BEGIN INSERT INTO target_fts(rowid,title,body) VALUES (new.rowid,new.title,new.body); END")
-  (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS targets_ad AFTER DELETE ON targets BEGIN INSERT INTO target_fts(target_fts,rowid,title,body) VALUES ('delete',old.rowid,old.title,old.body); END")
-  t)
+  "Migrate DB from the original lexical schema to current schema.
+Rebuild the external-content FTS table only once when upgrading databases
+created before migration version 1; healthy opens do not rewrite the index."
+  (let ((version (or (caar (sqlite-select db "PRAGMA user_version")) 0)))
+    (sqlite-transaction db)
+    (condition-case err
+        (progn
+          (sqlite-execute db "CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, root TEXT NOT NULL, digest TEXT NOT NULL)")
+          (sqlite-execute db "CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, org_id TEXT, position INTEGER NOT NULL, digest TEXT NOT NULL, capture_policy TEXT NOT NULL DEFAULT 'eligible', level INTEGER NOT NULL DEFAULT 0, outline_path TEXT NOT NULL DEFAULT '', properties TEXT NOT NULL DEFAULT 'nil', FOREIGN KEY(path) REFERENCES sources(path))")
+          (dolist (migration '("ALTER TABLE targets ADD COLUMN capture_policy TEXT NOT NULL DEFAULT 'eligible'"
+                               "ALTER TABLE targets ADD COLUMN level INTEGER NOT NULL DEFAULT 0"
+                               "ALTER TABLE targets ADD COLUMN outline_path TEXT NOT NULL DEFAULT ''"
+                               "ALTER TABLE targets ADD COLUMN properties TEXT NOT NULL DEFAULT 'nil'"))
+            (condition-case nil (sqlite-execute db migration) (error nil)))
+          (sqlite-execute db "CREATE INDEX IF NOT EXISTS targets_path ON targets(path)")
+          (sqlite-execute db "CREATE INDEX IF NOT EXISTS targets_title ON targets(title)")
+          (sqlite-execute db "CREATE VIRTUAL TABLE IF NOT EXISTS target_fts USING fts5(title, body, content='targets', content_rowid='rowid')")
+          (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS targets_ai AFTER INSERT ON targets BEGIN INSERT INTO target_fts(rowid,title,body) VALUES (new.rowid,new.title,new.body); END")
+          (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS targets_ad AFTER DELETE ON targets BEGIN INSERT INTO target_fts(target_fts,rowid,title,body) VALUES ('delete',old.rowid,old.title,old.body); END")
+          (when (< version 1)
+            ;; Older databases could have an absent or incomplete external-content
+            ;; index. Repair once as part of migration, not on every connection.
+            (sqlite-execute db "INSERT INTO target_fts(target_fts) VALUES('rebuild')")
+            (sqlite-execute db "PRAGMA user_version = 1"))
+          (sqlite-commit db)
+          t)
+      (error
+       (sqlite-rollback db)
+       (signal (car err) (cdr err))))))
 
 (defun org-glean--digest (path)
   "Hash the literal saved bytes in PATH."
@@ -125,7 +140,6 @@ An empty INCLUDES list accepts every .org file."
       (condition-case err
           (progn
             (org-glean--migrate-database db)
-            (sqlite-execute db "INSERT INTO target_fts(target_fts) VALUES('rebuild')")
             (setq org-glean--database db
                   org-glean--database-path (expand-file-name org-glean-database-file)))
         (error (sqlite-close db)
