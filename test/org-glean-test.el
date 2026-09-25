@@ -109,6 +109,64 @@
         (should (stringp (nth 2 row)))
         (should (equal (org-glean--chunk-digest (nth 2 row)) (nth 3 row)))))))
 
+(ert-deftest org-glean-test-chunk-windows-splits-long-body-with-overlap ()
+  (let* ((org-glean-chunk-max-chars 40)
+         (org-glean-chunk-overlap-chars 10)
+         (body (string-join (list "Paragraph one is here." "Paragraph two follows."
+                                  "Paragraph three arrives." "Paragraph four ends it.")
+                            "\n\n"))
+         (windows (org-glean--chunk-windows body)))
+    (should (> (length windows) 1))
+    ;; Every paragraph's text appears in at least one window: windowing must
+    ;; never drop content, only split and duplicate it at the boundary.
+    (dolist (paragraph (org-glean--chunk-paragraphs body))
+      (should (cl-some (lambda (window) (string-search paragraph window)) windows)))
+    ;; The last paragraph of one window recurs as overlap context at the
+    ;; start of the next, so a fact near a cut is not siloed into one window.
+    (should (cl-some (lambda (pair)
+                       (let ((a (nth 0 pair)) (b (nth 1 pair)))
+                         (and (> (length a) 0)
+                              (string-search (car (last (org-glean--chunk-paragraphs a))) b))))
+                     (cl-mapcar #'list windows (cdr windows))))))
+
+(ert-deftest org-glean-test-chunk-windows-empty-body-yields-no-chunks ()
+  (should (null (org-glean--chunk-windows "")))
+  (should (null (org-glean--chunk-windows "   \n\n  "))))
+
+(ert-deftest org-glean-test-chunk-context-line-uses-outline-path ()
+  (should (equal "File > Section > Heading"
+                 (org-glean--chunk-context-line
+                  (list :kind "heading" :title "Heading"
+                        :outline-path '("File" "Section" "Heading")))))
+  (should (equal "File Title"
+                 (org-glean--chunk-context-line
+                  (list :kind "file" :title "File Title")))))
+
+(ert-deftest org-glean-test-chunk-record-text-includes-file-outline ()
+  (let* ((heading-a (list :key "a" :kind "heading" :title "Alpha" :level 1
+                          :outline-path '("Alpha") :body "alpha body"))
+         (heading-b (list :key "b" :kind "heading" :title "Beta" :level 1
+                          :outline-path '("Beta") :body "beta body"))
+         (file-record (list :key "f" :kind "file" :title "Doc" :body "intro"))
+         (records (list file-record heading-a heading-b))
+         (file-chunks (org-glean--chunk-record file-record records)))
+    (should (= 1 (length file-chunks)))
+    (should (string-search "Alpha" (plist-get (car file-chunks) :text)))
+    (should (string-search "Beta" (plist-get (car file-chunks) :text)))
+    (should (string-search "Doc" (plist-get (car file-chunks) :text)))))
+
+(ert-deftest org-glean-test-chunk-digest-unaffected-by-position ()
+  ;; A heading that moved within its file (different :position) but has
+  ;; identical context/body must keep the same chunk digest, so its vector
+  ;; survives the move instead of being needlessly re-embedded.
+  (let* ((records (list (list :key "moved" :kind "heading" :title "Stable"
+                              :outline-path '("Stable") :body "same body" :position 1))))
+    (let* ((chunk-a (car (org-glean--chunk-records records)))
+           (records-moved (list (list :key "moved" :kind "heading" :title "Stable"
+                                      :outline-path '("Stable") :body "same body" :position 99)))
+           (chunk-b (car (org-glean--chunk-records records-moved))))
+      (should (equal (plist-get chunk-a :text-digest) (plist-get chunk-b :text-digest))))))
+
 (ert-deftest org-glean-test-unchanged-reconcile-keeps-chunk-vector ()
   (org-glean-test--corpus
     (org-glean-test--write (expand-file-name "vector.org" root) "* Stable heading\nstable body\n")

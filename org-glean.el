@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'org-glean-core)
+(require 'org-glean-chunk)
 (require 'org-glean-store)
 (require 'org-glean-project)
 (require 'org-glean-index)

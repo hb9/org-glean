@@ -66,13 +66,16 @@ chunks(key, target_key, path, ord, text, text_digest)
 vectors(model_id, text_digest, dim, vector)
 ```
 
-A chunk is one embeddable passage owned by a target (currently one
-title+body chunk per target; windowed multi-chunk passages are planned). A
-vector is keyed on `(model_id, text_digest)` alone, never on a chunk or
-target key, so it survives reprojection, moves, and even a full
-reconciliation rebuild of an otherwise-unchanged passage.
-`org-glean--replace` rewrites a source's `chunks` rows wholesale on every
-change; it never deletes or writes `vectors`.
+A chunk is one embeddable passage owned by a target. A file-level target has
+one chunk summarizing its title and shallow heading outline; a heading
+target has one chunk per paragraph-aligned window of its outline-path-
+prefixed passage, with trailing-paragraph overlap into the next window (see
+`org-glean-chunk.el` and `ROADMAP.md` phase 1). A vector is keyed on
+`(model_id, text_digest)` alone, never on a chunk or target key, so it
+survives reprojection, moves, and even a full reconciliation rebuild of an
+otherwise-unchanged passage. `org-glean--replace` rewrites a source's
+`chunks` rows wholesale on every change; it never deletes or writes
+`vectors`.
 
 ### Query
 

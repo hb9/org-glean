@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'org-glean-core)
+(require 'org-glean-chunk)
 (require 'sqlite)
 (require 'json)
 
@@ -100,23 +101,12 @@ semantic materialization; it never touches `targets' or `sources'."
     (sqlite-close org-glean--database)
     (setq org-glean--database nil org-glean--database-path nil)))
 
-(defun org-glean--chunk-text (record)
-  "Return the passage text embedded for RECORD.
-This is the naive, single-chunk-per-target passage: title and body verbatim.
-Windowed, outline-aware chunking (multiple chunks for a long body, file-level
-outline context) is planned; see ROADMAP.md phase 1."
-  (string-join (delq nil (list (plist-get record :title) (plist-get record :body))) "\n"))
-
-(defun org-glean--chunk-digest (text)
-  "Return the content digest for chunk TEXT, keying its vector cache entry."
-  (secure-hash 'sha256 (encode-coding-string (string-trim text) 'utf-8)))
-
 (defun org-glean--replace (db path root digest records)
   "Atomically replace PATH owned by ROOT with DIGEST and RECORDS in DB.
-Each record's chunk rows are rewritten too. Chunk keys are per-target and are
-freely deleted and recreated; vectors are keyed on content digest alone and
-are never touched here, so an unchanged passage keeps its vector across this
-replacement."
+Each record's chunk rows are rewritten too, via `org-glean--chunk-records'.
+Chunk keys are per-target and are freely deleted and recreated; vectors are
+keyed on content digest alone and are never touched here, so an unchanged
+passage keeps its vector across this replacement."
   (sqlite-transaction db)
   (condition-case err
       (progn
@@ -132,13 +122,12 @@ replacement."
                                   (or (plist-get record :capture-policy) "eligible")
                                   (or (plist-get record :level) 0)
                                   (mapconcat #'identity (plist-get record :outline-path) "\x1f")
-                                  (org-glean--sql-properties (plist-get record :properties))))
-          (let ((text (org-glean--chunk-text record)))
-            (unless (string-empty-p (string-trim text))
-              (sqlite-execute db "INSERT INTO chunks(key,target_key,path,ord,text,text_digest) VALUES(?,?,?,?,?,?)"
-                              (vector (concat (plist-get record :key) "#chunk:0")
-                                      (plist-get record :key) path 0 text
-                                      (org-glean--chunk-digest text))))))
+                                  (org-glean--sql-properties (plist-get record :properties)))))
+        (dolist (chunk (org-glean--chunk-records records))
+          (sqlite-execute db "INSERT INTO chunks(key,target_key,path,ord,text,text_digest) VALUES(?,?,?,?,?,?)"
+                          (vector (plist-get chunk :key) (plist-get chunk :target-key)
+                                  path (plist-get chunk :ord) (plist-get chunk :text)
+                                  (plist-get chunk :text-digest))))
         (unless (equal digest (org-glean--digest path))
           (error "Source changed before replacement committed"))
         (sqlite-commit db))

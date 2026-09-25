@@ -37,12 +37,19 @@ Met.
       `(model_id, text_digest)`; coverage computed as a per-chunk fact, not a
       global generation digest. `org-glean--replace` rewrites a source's
       chunks wholesale but never touches `vectors`, so an unchanged passage
-      keeps its vector across reprojection. Chunking is still naive
-      (title+body verbatim, one chunk per target); windowed, outline-aware
-      passages are the next step below.
-- Chunking: file-level and heading-level passages with outline-path context,
-  windowed body text (~350–400 tokens, paragraph-aligned, overlapping) so no
-  content is silently truncated.
+      keeps its vector across reprojection. Chunking was initially naive
+      (title+body verbatim, one chunk per target); real chunking landed
+      next (below).
+- [x] Chunking (`org-glean-chunk.el`): a file-level passage summarizing its
+      shallow heading outline, and a heading passage prefixed with its full
+      outline path so a chunk is self-describing without its neighbours.
+      Long bodies split into paragraph-aligned windows
+      (`org-glean-chunk-max-chars`, default ~1500 characters — a character
+      estimate, not a token count; see the open question below) with
+      trailing-paragraph overlap (`org-glean-chunk-overlap-chars`) carried
+      into the next window. A chunk's digest depends only on its text, not
+      its position, so a heading that moves within its file keeps its
+      vector.
 - Backend protocol (`hello`/`embed`/`load`/`search`, JSON Lines over stdio)
   and our own `onnxruntime` + `tokenizers` wrapper — no third-party embedding
   library, no PyTorch.
@@ -115,3 +122,9 @@ which stays fully usable throughout on lexical/exact evidence.
   front end to keep in sync with Emacs's configuration authority.
 - **ANN vs. brute-force threshold.** Brute-force cosine is fine to roughly
   100k chunks; revisit if a real corpus approaches that size.
+- **Character-estimated chunk windows.** `org-glean-chunk-max-chars` is a
+  character count, not a token count, because Emacs does the windowing and
+  has no tokenizer. The backend (C3/C4) reports actual per-chunk truncation
+  against the model's real token limit; if that shows frequent truncation on
+  real content, tune the character estimate down or move windowing behind
+  the backend boundary where a real tokenizer is available.
