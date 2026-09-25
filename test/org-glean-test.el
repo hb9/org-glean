@@ -45,6 +45,9 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
           (org-glean--embed-responses nil)
           (org-glean--embed-callbacks nil)
           (org-glean--embed-response-buffer "")
+          (org-glean--semantic-queue-timer nil)
+          (org-glean--semantic-queue-state 'idle)
+          (org-glean--semantic-queue-inflight nil)
           (process-environment (cons "ORG_GLEAN_FAKE_EMBED=1" process-environment)))
      (make-directory (expand-file-name "bin" venv) t)
      (let ((python (expand-file-name "bin/python3" venv)))
@@ -57,6 +60,8 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
        (with-temp-file (expand-file-name "onnx/model.onnx" model-dir) (insert "")))
      (unwind-protect (progn ,@body)
        (org-glean-embed-stop)
+       (when (timerp org-glean--semantic-queue-timer)
+         (cancel-timer org-glean--semantic-queue-timer))
        (delete-directory venv t))))
 
 (ert-deftest org-glean-test-unchanged-reconcile-never-projects-or-replaces-source ()
@@ -919,6 +924,88 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
           (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
             (should-error (org-glean-install "not-a-real-preset"))))
       (delete-directory venv t))))
+
+(defun org-glean-test--wait-for (predicate &optional seconds)
+  "Pump the Emacs event loop until PREDICATE is non-nil or SECONDS elapse."
+  (let ((deadline (+ (float-time) (or seconds 5))))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (sit-for 0.05))
+    (funcall predicate)))
+
+(ert-deftest org-glean-test-semantic-queue-embeds-pending-chunks-in-a-batch ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
+      (org-glean-reconcile)
+      (let* ((db (org-glean--db))
+             (before (org-glean--semantic-coverage db "e5-small")))
+        (should (= 0 (car before)))
+        (should (> (cdr before) 0))
+        (let (done)
+          (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+          (should (org-glean-test--wait-for (lambda () done)))
+          (should (> done 0)))
+        (let ((after (org-glean--semantic-coverage db "e5-small")))
+          (should (equal after (cons (cdr before) (cdr before)))))))))
+
+(ert-deftest org-glean-test-semantic-queue-batch-is-noop-when-nothing-pending ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
+      (org-glean-reconcile)
+      (let (first-done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq first-done n)))
+        (org-glean-test--wait-for (lambda () first-done)))
+      (let (second-done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq second-done n)))
+        (should (org-glean-test--wait-for (lambda () second-done)))
+        (should (= 0 second-done))))))
+
+(ert-deftest org-glean-test-semantic-queue-skips-batch-while-one-in-flight ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
+      (org-glean-reconcile)
+      (let (first-done second-done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq first-done n)))
+        ;; A second call while the first is still in flight must not race it.
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq second-done n)))
+        (should (= 0 second-done))
+        (should (org-glean-test--wait-for (lambda () first-done)))
+        (should (> first-done 0))))))
+
+(ert-deftest org-glean-test-semantic-queue-batch-noop-when-backend-unavailable ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
+    (org-glean-reconcile)
+    (let (done)
+      (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+      (should (equal 0 done)))))
+
+(ert-deftest org-glean-test-semantic-queue-start-is-idempotent-and-pausable ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
+      (org-glean-reconcile)
+      (should (timerp org-glean--semantic-queue-timer))
+      (let ((first-timer org-glean--semantic-queue-timer))
+        (org-glean-semantic-queue-start)
+        (should (eq first-timer org-glean--semantic-queue-timer)))
+      (org-glean-semantic-pause)
+      (should (eq 'paused org-glean--semantic-queue-state))
+      (should-not (timerp org-glean--semantic-queue-timer))
+      (org-glean-semantic-queue-start)
+      (should-not (timerp org-glean--semantic-queue-timer))
+      (org-glean-semantic-resume)
+      (should (timerp org-glean--semantic-queue-timer)))))
+
+(ert-deftest org-glean-test-status-reports-semantic-queue-state ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
+      (org-glean-reconcile)
+      (should (memq (plist-get (org-glean-status) :semantic-queue-state)
+                    '(idle running paused))))))
 
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

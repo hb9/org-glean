@@ -90,6 +90,13 @@ consulted. See ROADMAP.md phase 1 for the preset table and backend."
 (defvar org-glean--last-errors nil
   "Alist of (SOURCE-PATH . MESSAGE) for the latest reconciliation failures.")
 
+(defvar org-glean-install-hook nil
+  "Hook run after `org-glean-install' completes with a passing self-test.
+Lets modules that depend on org-glean-embed (which cannot itself depend on
+them, to avoid a require cycle) react to a fresh install - for example
+starting the background embedding queue immediately rather than waiting
+for the next reconcile or save.")
+
 (defvar org-glean--database nil)
 
 (defvar org-glean--database-path nil)

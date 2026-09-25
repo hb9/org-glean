@@ -11,6 +11,7 @@
 (require 'org-glean-core)
 (require 'org-glean-store)
 (require 'org-glean-project)
+(require 'org-glean-semantic)
 (require 'cl-lib)
 
 (defun org-glean--sources ()
@@ -96,6 +97,7 @@ reported and preserved; a failed tree walk never deletes indexed sources."
                   (mapcar (lambda (failure) (cons (car failure) (cdr failure)))
                           (plist-get counts :failed))))
     (when (called-interactively-p 'interactive) (message "org-glean: %S" counts))
+    (org-glean-semantic-queue-start)
     counts))
 
 (defun org-glean-update-file (path)
@@ -108,6 +110,7 @@ reported and preserved; a failed tree walk never deletes indexed sources."
         (unless (equal digest (org-glean--digest absolute))
           (error "Source changed during projection: %s" absolute))
         (org-glean--replace (org-glean--db) absolute (car owner) digest records)
+        (org-glean-semantic-queue-start)
         t))))
 
   (defun org-glean--after-save ()
@@ -213,6 +216,7 @@ reported and preserved; a failed tree walk never deletes indexed sources."
                        :semantic-model org-glean-semantic-model
                        :semantic-coverage-chunks (car coverage)
                        :semantic-coverage-total (cdr coverage)
+                       :semantic-queue-state org-glean--semantic-queue-state
                        :errors (copy-tree org-glean--last-errors))))
     (when (called-interactively-p 'interactive)
       (message "org-glean: %S" status))

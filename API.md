@@ -173,9 +173,12 @@ active preset (`org-glean-semantic-model`, default `"e5-small"`).
 `:semantic-coverage-chunks`/`:semantic-coverage-total` report how many of the
 index's chunks have a vector for the active model — a per-chunk fact, never
 a single global stale/fresh flag, so one save never invalidates semantic
-search for the rest of the corpus. Status inspection is read-only.
-`org-glean-show-errors` renders the same reconciliation and search-provider
-failures in a dedicated buffer.
+search for the rest of the corpus. `:semantic-queue-state` is `idle`,
+`running`, or `paused`, reflecting the background embedding queue
+(`org-glean-semantic-queue-start`/`-pause`/`-resume`) that closes any
+coverage gap without blocking interactive use. Status inspection is
+read-only. `org-glean-show-errors` renders the same reconciliation and
+search-provider failures in a dedicated buffer.
 
 Errors are conditions, not result-set states. The v1 condition families are:
 
@@ -215,6 +218,10 @@ extracted.
 (org-glean-install &optional PRESET)          ; -> phase 1: managed backend install
 (org-glean-embed-available-p &optional PRESET) ; -> t if PRESET is installed
 (org-glean-embed-stop)                        ; -> nil; stop the backend process
+(org-glean-semantic-queue-start)              ; -> nil; ensure the background
+                                               ;    embedding queue is running
+(org-glean-semantic-pause)                    ; -> nil; stop the queue
+(org-glean-semantic-resume)                   ; -> nil; restart the queue
 ```
 
 `org-glean-install` is interactive-first (prompts for PRESET via

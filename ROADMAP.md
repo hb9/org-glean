@@ -80,9 +80,21 @@ Met.
       fully async step chain is deferred (see open questions).
 - Model presets: `e5-small` (default), `e5-base`, `bge-m3` — swappable via
   `org-glean-semantic-model` with no other invalidation.
-- Background embedding queue: saves and reconciliation update chunks and
-  lexical search immediately; an idle timer embeds queued chunks in bounded,
-  cancellable batches via process callbacks (never blocking Emacs).
+- [x] Background embedding queue (`org-glean-semantic.el`): saves and
+      reconciliation update chunks and lexical search immediately, then call
+      `org-glean-semantic-queue-start`, which starts an idle timer (fires
+      only once Emacs is idle, so it naturally pauses while typing with no
+      `input-pending-p` polling needed). Each tick embeds one bounded batch
+      (`org-glean-semantic-batch-size`, default 32) of chunks lacking a
+      vector for the active model, asynchronously; the batch's callback
+      writes vectors in one transaction and pushes them into the backend's
+      in-memory `load` cache so a query right after sees them. Overlapping
+      batches are prevented by an in-flight flag, not by stopping the
+      timer. `org-glean-semantic-pause`/`-resume` stop/restart it;
+      `org-glean-status`'s `:semantic-queue-state` reports `idle`/
+      `running`/`paused`. `org-glean-install-hook` (run after a passing
+      self-test) starts the queue immediately after a fresh install,
+      without needing a require cycle back into org-glean-embed.el.
 - Asynchronous semantic query with in-memory backend-held vectors and
   structural prefiltering (no per-query key-list shipping); a synchronous
   wrapper with a timeout for MCP/batch callers.

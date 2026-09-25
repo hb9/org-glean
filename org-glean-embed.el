@@ -295,7 +295,8 @@ search never reaches any of this implicitly."
     (if (org-glean--install-self-test preset)
         (progn
           (org-glean--install-log buffer "Self-test passed: paraphrase ranked correctly.\n")
-          (message "org-glean-install: %s installed and verified" preset))
+          (message "org-glean-install: %s installed and verified" preset)
+          (run-hooks 'org-glean-install-hook))
       (org-glean--install-log buffer "Self-test FAILED: paraphrase did not outrank the distractor.\n")
       (pop-to-buffer buffer)
       (error "org-glean-install: self-test failed for %s; see buffer %s" preset (buffer-name buffer)))
