@@ -51,6 +51,19 @@ def _ensure_system_ca_bundle_is_trusted() -> None:
         os.environ["SSL_CERT_FILE"] = cafile
 
 
+def _copy_overwriting(src: Path, dst: Path) -> None:
+    """Copy SRC to DST, overwriting DST even if a previous run left it
+    read-only. hf_hub_download's cache copies preserve the upstream file's
+    permissions, which are typically read-only; shutil.copy2 opens DST for
+    writing and fails on a stale read-only file from an earlier attempt
+    (e.g. one that got this far and then failed on a later step), so this
+    makes re-running org-glean-install after a partial failure idempotent
+    instead of requiring the user to manually clear the model directory."""
+    if dst.exists():
+        dst.unlink()
+    shutil.copy2(src, dst)
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: org_glean_download.py PRESET TARGET_DIR", file=sys.stderr)
@@ -73,13 +86,13 @@ def main() -> int:
             downloaded = hf_hub_download(repo_id=model_id, filename=filename)
         except Exception:
             continue  # not every model ships every tokenizer-side file
-        shutil.copy2(downloaded, target_dir / filename)
+        _copy_overwriting(Path(downloaded), target_dir / filename)
 
     onnx_file = preset["onnx_file"]
     downloaded_onnx = hf_hub_download(repo_id=model_id, filename=onnx_file)
     onnx_target = target_dir / onnx_file
     onnx_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(downloaded_onnx, onnx_target)
+    _copy_overwriting(Path(downloaded_onnx), onnx_target)
 
     if not (target_dir / "tokenizer.json").exists():
         print(f"error: {model_id} has no tokenizer.json; unsupported for now", file=sys.stderr)

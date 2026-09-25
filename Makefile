@@ -14,7 +14,7 @@ test:
 # with ORG_GLEAN_FAKE_EMBED=1, so this needs only the stdlib and pytest, no
 # onnxruntime/tokenizers/numpy install.
 test-py:
-	$(PYTHON) -m pytest -q test/test_embed_backend.py
+	$(PYTHON) -m pytest -q test/test_embed_backend.py test/test_download_script.py
 
 # Byte-compiles each module in isolation so cross-module require cycles and
 # missing requires surface immediately. org-glean-mcp.el is intentionally

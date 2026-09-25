@@ -183,6 +183,16 @@ network and a real model, neither caught by the fake-embedder test suite:**
    (`org-glean-test-semantic-provider-survives-backend-restart`) forces
    exactly this reload path with the fake backend so this class of bug is
    now caught without needing a real model.
+3. **Re-running `org-glean-install` crashed on a partial prior success.**
+   `hf_hub_download`'s cache copies preserve the upstream file's (typically
+   read-only) permissions; `shutil.copy2` opens the destination for
+   writing and raised `PermissionError` the moment a second install
+   attempt tried to overwrite a file a first, successful download had
+   already placed (e.g. after `org-glean-install` failed on a later step
+   and was simply re-run). Fixed with `_copy_overwriting`, which removes
+   an existing destination file before copying; covered by
+   `test/test_download_script.py` (no network needed — it tests the copy
+   helper directly, including the read-only-destination case).
 
 ## Phase 2 — Hybrid quality
 
