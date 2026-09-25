@@ -671,7 +671,7 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
             (should (eq #'org-glean-results-visit
                         (lookup-key org-glean-results-mode-map (kbd "RET"))))
             (should (= 1 (length tabulated-list-entries)))
-            (should (equal '("id-key" ["title" "heading" "source.org" "lexical" "yes"])
+            (should (equal '("id-key" ["title" "heading" "source.org" "lexical" "yes" "lexical"])
                            (org-glean--tabulated-entry
                             '((:key . "id-key") (:title . "title") (:kind . "heading")
                                (:path . "/tmp/source.org") (:match-type . lexical)
@@ -1180,6 +1180,112 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (= 1 (length results)))
         (should (equal '(exact lexical) (alist-get 'used response)))
         (should (eq 'semantic (alist-get 'provider (aref (alist-get 'provider-errors response) 0))))))))
+
+(ert-deftest org-glean-test-default-modes-omits-semantic-when-not-installed ()
+  (org-glean-test--corpus
+    (should (equal '(exact lexical fuzzy) (org-glean--default-modes)))))
+
+(ert-deftest org-glean-test-default-modes-includes-semantic-when-installed ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (should (equal '(exact lexical fuzzy semantic) (org-glean--default-modes))))))
+
+(ert-deftest org-glean-test-default-modes-override-is-respected ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (let ((org-glean-default-modes '(exact)))
+        (should (equal '(exact) (org-glean--default-modes)))))))
+
+(ert-deftest org-glean-test-mcp-uses-default-modes-when-caller-omits-them ()
+  (org-glean-test--corpus
+    (let* ((path (expand-file-name "note.org" root))
+           (org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write path "* Heading\nneedle\n")
+      (org-glean-reconcile)
+      (let* ((decoded (json-parse-string
+                       (org-glean-mcp--handler '((query . "needle")))
+                       :object-type 'alist))
+             (requested (alist-get 'requested decoded)))
+        ;; No semantic backend installed in this fixture, so the automatic
+        ;; default must not claim semantic was requested.
+        (should-not (alist-get 'semantic requested))
+        (should (alist-get 'exact requested))
+        (should (alist-get 'lexical requested))
+        (should (alist-get 'fuzzy requested))))))
+
+(ert-deftest org-glean-test-find-semantic-errors-when-not-installed ()
+  (org-glean-test--corpus
+    (should-error (org-glean-find-semantic "anything") :type 'user-error)))
+
+(ert-deftest org-glean-test-search-buffer-semantic-errors-when-not-installed ()
+  (org-glean-test--corpus
+    (should-error (org-glean-search-buffer-semantic "anything") :type 'user-error)))
+
+(ert-deftest org-glean-test-search-buffer-semantic-forces-semantic-only-modes ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "weld.org" root)
+                             "* Weld inspection procedure\ncheck the seam\n")
+      (org-glean-reconcile)
+      (let (done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+        (should (org-glean-test--wait-for (lambda () done))))
+      (org-glean-search-buffer-semantic "weld inspection")
+      (let ((buffer (get-buffer "*Org Glean Results*")))
+        (unwind-protect
+            (with-current-buffer buffer
+              (should (equal '(semantic) org-glean--results-modes)))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest org-glean-test-results-buffer-toggle-semantic-only-round-trips ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "weld.org" root)
+                             "* Weld inspection procedure\ncheck the seam\n")
+      (org-glean-reconcile)
+      (let (done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+        (should (org-glean-test--wait-for (lambda () done))))
+      (org-glean-search-buffer "weld inspection")
+      (let ((buffer (get-buffer "*Org Glean Results*")))
+        (unwind-protect
+            (with-current-buffer buffer
+              (let ((original org-glean--results-modes))
+                (org-glean-results-toggle-semantic-only)
+                (should (equal '(semantic) org-glean--results-modes))
+                (org-glean-results-toggle-semantic-only)
+                (should (equal original org-glean--results-modes))))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest org-glean-test-keymap-prefix-binds-and-can-be-disabled ()
+  (let ((org-glean-keymap-prefix "C-c C-x g"))
+    (org-glean--install-keymap-prefix 'org-glean-keymap-prefix "C-c C-x g")
+    (should (eq org-glean-command-map (key-binding (kbd "C-c C-x g"))))
+    (org-glean--install-keymap-prefix 'org-glean-keymap-prefix nil)
+    (should-not (eq org-glean-command-map (key-binding (kbd "C-c C-x g"))))
+    ;; Restore the real default so later tests/interactive use are unaffected.
+    (org-glean--install-keymap-prefix 'org-glean-keymap-prefix "M-s g")))
+
+(ert-deftest org-glean-test-command-map-has-expected-bindings ()
+  (should (eq #'org-glean-find (lookup-key org-glean-command-map "g")))
+  (should (eq #'org-glean-search-buffer (lookup-key org-glean-command-map "G")))
+  (should (eq #'org-glean-find-semantic (lookup-key org-glean-command-map "s")))
+  (should (eq #'org-glean-search-buffer-semantic (lookup-key org-glean-command-map "S")))
+  (should (eq #'org-glean-reconcile (lookup-key org-glean-command-map "r")))
+  (should (eq #'org-glean-status (lookup-key org-glean-command-map "i")))
+  (should (eq #'org-glean-show-errors (lookup-key org-glean-command-map "e")))
+  (should (eq #'org-glean-semantic-toggle (lookup-key org-glean-command-map "p"))))
+
+(ert-deftest org-glean-test-semantic-toggle-pauses-and-resumes ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
+      (org-glean-reconcile)
+      (should (timerp org-glean--semantic-queue-timer))
+      (org-glean-semantic-toggle)
+      (should (eq 'paused org-glean--semantic-queue-state))
+      (org-glean-semantic-toggle)
+      (should (timerp org-glean--semantic-queue-timer)))))
 
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

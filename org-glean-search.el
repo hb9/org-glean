@@ -43,6 +43,32 @@ K flattens the difference between a mode's rank-1 and rank-20 candidates;
   :type 'integer
   :group 'org-glean)
 
+(defcustom org-glean-default-modes nil
+  "Provider modes requested by the interactive commands and MCP when the
+caller does not specify any. Nil (the default) means automatic:
+`(exact lexical fuzzy semantic)' once a semantic backend is configured
+and installed for the active model (`org-glean-embed-available-p'),
+otherwise `(exact lexical fuzzy)'. Set this explicitly to override the
+automatic choice, for example to keep fuzzy out of the default search
+once semantic search covers \"close but not exact\" queries better.
+
+This governs `org-glean-find', `org-glean-search-buffer' and the MCP
+adapter. It does not change `org-glean-search-api's own low-level
+default (`(exact lexical)', plus `fuzzy' only when its FUZZY argument is
+non-nil) — existing programmatic callers of the application API keep
+their current behavior unless they ask for `org-glean--default-modes'
+themselves."
+  :type '(choice (const :tag "Automatic" nil) (repeat symbol))
+  :group 'org-glean)
+
+(defun org-glean--default-modes ()
+  "Return the modes the interactive commands and MCP use by default."
+  (or org-glean-default-modes
+      (if (and org-glean-semantic-provider
+               (org-glean-embed-available-p org-glean-semantic-model))
+          '(exact lexical fuzzy semantic)
+        '(exact lexical fuzzy))))
+
 (defun org-glean-search-exact (title &optional limit)
   "Return at most LIMIT targets whose title exactly matches TITLE."
   (org-glean--results

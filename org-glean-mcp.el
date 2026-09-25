@@ -32,7 +32,7 @@ An empty value falls back to the configured Org Glean roots."
              (property-key (alist-get 'property_key args))
              (property-value (alist-get 'property_value args))
               (modes (let ((requested (mapcar #'intern (append (alist-get 'modes args) nil))))
-                       (or requested '(exact lexical fuzzy))))
+                       (or requested (org-glean--default-modes))))
               (roots (or org-glean-mcp-allowed-roots
                          (mapcar #'cadr org-glean-roots)))
               (filters (list :allowed-roots roots

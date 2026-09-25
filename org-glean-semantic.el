@@ -191,6 +191,14 @@ updates, and after a successful `org-glean-install'."
   (setq org-glean--semantic-queue-state 'idle)
   (org-glean-semantic-queue-start))
 
+(defun org-glean-semantic-toggle ()
+  "Pause the background embedding queue if running, resume it if paused."
+  (interactive)
+  (if (eq org-glean--semantic-queue-state 'paused)
+      (org-glean-semantic-resume)
+    (org-glean-semantic-pause))
+  (message "org-glean: semantic queue %s" org-glean--semantic-queue-state))
+
 (add-hook 'org-glean-install-hook #'org-glean-semantic-queue-start)
 
 (provide 'org-glean-semantic)

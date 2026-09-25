@@ -11,6 +11,7 @@
 (require 'org-glean-core)
 (require 'org-glean-store)
 (require 'org-glean-search)
+(require 'org-glean-index)
 (require 'org)
 (require 'tabulated-list)
 (require 'cl-lib)
@@ -96,13 +97,14 @@
     (define-key map (kbd "TAB") #'org-glean-results-preview)
     (define-key map (kbd "e") #'org-glean-results-toggle-group)
     (define-key map (kbd "g") #'org-glean-results-refresh)
+    (define-key map (kbd "s") #'org-glean-results-toggle-semantic-only)
     map))
 
 (define-derived-mode org-glean-results-mode tabulated-list-mode "Org-Glean"
   "Major mode for bounded Org Glean results."
   (setq tabulated-list-format
-        [("Title" 38 t) ("Kind" 10 t) ("Source" 28 t) ("Match" 12 t)
-         ("Fresh" 7 t)])
+        [("Title" 34 t) ("Kind" 8 t) ("Source" 22 t) ("Match" 8 t)
+         ("Fresh" 6 t) ("Via" 12 t)])
   (setq tabulated-list-padding 2
         tabulated-list-sort-key nil)
   (tabulated-list-init-header))
@@ -116,6 +118,36 @@
 (defvar-local org-glean--results-groups nil)
 
 (defvar-local org-glean--results-expanded-groups nil)
+
+(defvar-local org-glean--results-modes nil
+  "Provider modes the current results buffer searches with.
+Set by `org-glean-search-buffer'; toggled to/from semantic-only by
+`org-glean-results-toggle-semantic-only', which remembers the prior
+value in `org-glean--results-previous-modes'.")
+
+(defvar-local org-glean--results-previous-modes nil)
+
+(defun org-glean--mode-abbrev (mode)
+  "Return a short display label for provider MODE."
+  (pcase mode
+    ('exact "exact") ('lexical "lex") ('fuzzy "fuzzy") ('semantic "sem")
+    (_ (symbol-name mode))))
+
+(defun org-glean--modes-summary (item)
+  "Return ITEM's contributing modes as a short \"a+b\" string.
+Modes are ordered by their fusion contribution, strongest first, so this
+reads the same way `:match-type' (the single strongest contributor) was
+chosen. Falls back to the bare match-type for an ITEM built without a
+`:modes' list (e.g. constructed directly rather than via
+`org-glean-search-filtered')."
+  (let ((modes (alist-get :modes item)))
+    (if (null modes)
+        (or (and (alist-get :match-type item) (symbol-name (alist-get :match-type item))) "")
+      (mapconcat (lambda (m) (org-glean--mode-abbrev (car m)))
+                (sort (copy-sequence modes)
+                      (lambda (a b) (> (org-glean--fusion-contribution (car a) (nth 1 a))
+                                      (org-glean--fusion-contribution (car b) (nth 1 b)))))
+                "+"))))
 
 (defun org-glean--result-groups (items)
   "Group repeated fuzzy headings in the same file from ITEMS."
@@ -151,8 +183,9 @@
          (kind (or (alist-get :kind item) ""))
          (source (file-name-nondirectory (alist-get :path item)))
          (match (symbol-name (alist-get :match-type item)))
-         (fresh (if (alist-get :source-current item) "yes" "stale")))
-    (list key (vector title kind source match fresh))))
+         (fresh (if (alist-get :source-current item) "yes" "stale"))
+         (via (org-glean--modes-summary item)))
+    (list key (vector title kind source match fresh via))))
 
 (defun org-glean--tabulated-rows ()
   "Build collapsed/expanded tabulated rows from the current search results."
@@ -209,10 +242,15 @@
   "Refresh the current Org Glean result buffer."
   (interactive)
   (unless org-glean--results-query (user-error "No Org Glean query to refresh"))
-  (let* ((response (org-glean-search-api org-glean--results-query 100 t
-                                         org-glean--results-filters))
-         (results (alist-get 'results response)))
-    (setq org-glean--results-items (append results nil)
+  (let* ((modes (or org-glean--results-modes (org-glean--default-modes)))
+         (response (org-glean-search-api org-glean--results-query 100 nil
+                                         org-glean--results-filters modes))
+         (results (alist-get 'results response))
+         (coverage (and (memq 'semantic modes)
+                       (org-glean-embed-available-p org-glean-semantic-model)
+                       (org-glean--semantic-coverage (org-glean--db) org-glean-semantic-model))))
+    (setq org-glean--results-modes modes
+          org-glean--results-items (append results nil)
           org-glean--results-groups (org-glean--result-groups org-glean--results-items)
           org-glean--results-expanded-groups
           (cl-remove-if-not (lambda (key)
@@ -221,9 +259,12 @@
                             org-glean--results-expanded-groups)
           tabulated-list-entries (org-glean--tabulated-rows))
     (tabulated-list-print t)
-      (setq header-line-format
-          (format "Query: %s | freshness: %s | %d targets — TAB previews, RET visits, e expands/collapses, g refreshes"
-                  org-glean--results-query (alist-get 'freshness response)
+    (setq header-line-format
+          (format "Query: %s | modes: %s%s | freshness: %s | %d targets — TAB previews, RET visits, e expands/collapses, s toggles semantic-only, g refreshes"
+                  org-glean--results-query
+                  (mapconcat #'symbol-name modes ",")
+                  (if coverage (format " (semantic %d/%d embedded)" (car coverage) (cdr coverage)) "")
+                  (alist-get 'freshness response)
                   (length results)))))
 
 (defun org-glean-results-visit ()
@@ -251,24 +292,51 @@
           (setq tabulated-list-entries (org-glean--tabulated-rows))
     (tabulated-list-print t)))
 
-(defun org-glean-search-buffer (query &optional filters)
+(defun org-glean--require-semantic-installed ()
+  "Signal a `user-error' unless semantic search is ready to use right now."
+  (unless (and org-glean-semantic-provider
+              (org-glean-embed-available-p org-glean-semantic-model))
+    (user-error "Semantic search is not installed for model %s; run M-x org-glean-install"
+               org-glean-semantic-model)))
+
+(defun org-glean-results-toggle-semantic-only ()
+  "Toggle the current results buffer between its normal modes and semantic-only."
+  (interactive)
+  (unless org-glean--results-query (user-error "No Org Glean query to refresh"))
+  (if (equal org-glean--results-modes '(semantic))
+      (setq org-glean--results-modes (or org-glean--results-previous-modes
+                                         (org-glean--default-modes)))
+    (org-glean--require-semantic-installed)
+    (setq org-glean--results-previous-modes org-glean--results-modes
+          org-glean--results-modes '(semantic)))
+  (org-glean-results-refresh))
+
+(defun org-glean-search-buffer (query &optional filters modes)
   "Show QUERY in an exploration results buffer.
-FILTERS is the generic result-filter plist accepted by `org-glean-search-api'."
+FILTERS is the generic result-filter plist accepted by `org-glean-search-api'.
+MODES defaults to `org-glean--default-modes'."
   (interactive "sSearch Org: ")
   (let ((buffer (get-buffer-create "*Org Glean Results*")))
     (with-current-buffer buffer
       (org-glean-results-mode)
       (setq org-glean--results-query query
-            org-glean--results-filters filters)
+            org-glean--results-filters filters
+            org-glean--results-modes (or modes (org-glean--default-modes))
+            org-glean--results-previous-modes nil)
       (org-glean-results-refresh))
     (pop-to-buffer buffer)))
 
+(defun org-glean-search-buffer-semantic (query &optional filters)
+  "Show QUERY in an exploration results buffer, semantic candidates only."
+  (interactive "sSemantic search Org: ")
+  (org-glean--require-semantic-installed)
+  (org-glean-search-buffer query filters '(semantic)))
+
 ;;;###autoload
 
-(defun org-glean-find (query)
-  "Pick and visit a bounded fuzzy/FTS result for QUERY."
-  (interactive "sSearch Org: ")
-  (let* ((results (append (alist-get 'results (org-glean-search-api query nil t)) nil))
+(defun org-glean--find-1 (query modes)
+  "Pick and visit a bounded result for QUERY using MODES."
+  (let* ((results (append (alist-get 'results (org-glean-search-api query nil nil nil modes)) nil))
          (choices (cl-loop for item in results for n from 1
                            collect (cons (format "%d. %s — %s (%s)" n
                                                  (alist-get :title item)
@@ -277,6 +345,58 @@ FILTERS is the generic result-filter plist accepted by `org-glean-search-api'."
          (choice (and choices (completing-read "Visit: " choices nil t))))
     (unless choice (user-error "No matches"))
     (org-glean-visit (cdr (assoc choice choices)))))
+
+(defun org-glean-find (query)
+  "Pick and visit a bounded result for QUERY using the default provider modes."
+  (interactive "sSearch Org: ")
+  (org-glean--find-1 query (org-glean--default-modes)))
+
+(defun org-glean-find-semantic (query)
+  "Pick and visit a semantic-only result for QUERY."
+  (interactive "sSemantic search Org: ")
+  (org-glean--require-semantic-installed)
+  (org-glean--find-1 query '(semantic)))
+
+(defvar org-glean-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "g" #'org-glean-find)
+    (define-key map "G" #'org-glean-search-buffer)
+    (define-key map "s" #'org-glean-find-semantic)
+    (define-key map "S" #'org-glean-search-buffer-semantic)
+    (define-key map "r" #'org-glean-reconcile)
+    (define-key map "i" #'org-glean-status)
+    (define-key map "e" #'org-glean-show-errors)
+    (define-key map "p" #'org-glean-semantic-toggle)
+    map)
+  "Command map for Org Glean, bound under `org-glean-keymap-prefix'.
+\\{org-glean-command-map}")
+
+(defvar org-glean--keymap-prefix-installed nil
+  "The key sequence last installed by `org-glean-keymap-prefix', if any.")
+
+(defun org-glean--install-keymap-prefix (symbol value)
+  "Custom :set function for `org-glean-keymap-prefix': (re)bind the map."
+  (set-default symbol value)
+  (when org-glean--keymap-prefix-installed
+    (define-key global-map org-glean--keymap-prefix-installed nil))
+  (setq org-glean--keymap-prefix-installed nil)
+  (when value
+    (define-key global-map (kbd value) org-glean-command-map)
+    (setq org-glean--keymap-prefix-installed (kbd value))))
+
+(defcustom org-glean-keymap-prefix "M-s g"
+  "Key sequence `org-glean-command-map' is bound under.
+Nil disables the global binding; the map is still available to bind
+yourself, e.g. `(define-key some-map (kbd \"C-c g\") org-glean-command-map)'.
+
+Default bindings: `g' find, `G' search buffer, `s' semantic-only find,
+`S' semantic-only search buffer, `r' reconcile, `i' status, `e' show
+errors, `p' pause/resume the background embedding queue. Inside a
+results buffer, `s' additionally toggles that buffer between its normal
+modes and semantic-only."
+  :type '(choice (const :tag "Disabled" nil) string)
+  :set #'org-glean--install-keymap-prefix
+  :group 'org-glean)
 
 (provide 'org-glean-ui)
 ;;; org-glean-ui.el ends here
