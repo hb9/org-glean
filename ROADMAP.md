@@ -284,6 +284,65 @@ this corpus's actual retrieval quality).
   not a side effect of chunk-level scoring — including caller-selected
   chunk/heading/file result granularity.
 
+### Real-corpus semantic quality fixes (done)
+
+Measured against the maintainer's real corpus (78 sources, ~3200 chunks
+after the migration below), not synthetic fixtures. Three independent
+problems, each confirmed before fixing:
+
+- [x] **Missing chunks for pre-existing targets.** The v1→v2 migration
+      added the `chunks`/`vectors` tables but never populated chunks for
+      targets that existed before it ran, and reconcile's unchanged-source
+      skip meant those targets could never be chunked afterwards either. A
+      v2→v3 migration (`org-glean--backfill-chunks`) reconstructs chunks
+      directly from `targets` rows with no re-parse of the source Org
+      files needed. Verified on a copy of the real database: 2926 targets
+      → 3176 chunks.
+- [x] **Chunk hygiene.** ~13% of chunks were content-free (bare URL lists,
+      Org logbook `State "DONE" from "TODO" [...]` lines, hour tables) yet
+      still occupied result slots. `org-glean-chunk-min-words` (default 6)
+      plus noise-stripping (`org-glean--chunk-strip-noise`: URLs, logbook
+      state lines, bare timestamp brackets — from the *embedded* text
+      only, never the stored target body) filters them at chunk time; a
+      short heading borrows its file's title as extra context before the
+      word-count check runs. A v3→v4 migration re-chunks everything.
+- [x] **Score squashing and hub chunks.** multilingual-e5-small crowds
+      nearly every chunk into cosine 0.77–0.85 against almost any query —
+      no natural separation between the best match and the 500th — and a
+      handful of "hub" chunks (an oauth login dump, a training-portal
+      link) scored in the top results for completely unrelated queries.
+      Two corrections, validated together (neither alone was sufficient):
+      mean-centering (subtract the corpus's mean vector from every vector
+      including the query, before scoring) and a CSLS-style hub penalty
+      (subtract each candidate's own mean similarity to its 10 nearest
+      neighbours, `hub_lambda` default 0.5). Combined with the two above,
+      all 11 known-good queries measured against the real corpus rank
+      their target #1 (previously up to rank 2184 for "food"). Scores are
+      reported as a z-score relative to the candidate pool's own
+      median/spread (`org-glean-semantic-min-z`, default 3.0) rather than
+      an absolute cosine cutoff, since measurement showed a fixed cosine
+      threshold does not transfer across queries; a hard cap
+      (`org-glean-semantic-max-hits`, default 10) bounds how many
+      semantic candidates one query contributes to fusion, and a
+      semantic hit's fusion weight is itself scaled by `min(1, z/5)` so a
+      barely-qualifying hit contributes far less than a confident one.
+      **Real bug caught while implementing this**: a z-score is not
+      statistically meaningful below a minimum candidate pool size —
+      numerically optimizing the exact formula shows the single best
+      candidate among 7 cannot exceed z≈2.96 under any arrangement of the
+      other six, so `min_z=3.0` was unreachable by construction for any
+      query whose candidate pool had fewer than 8 items, not just for
+      genuinely irrelevant queries. A `min_pool_for_z` guard (default 10)
+      simply skips `min_z` filtering below that floor, falling back to
+      top-k by score, so a modest corpus or a narrowly-filtered search
+      does not silently lose semantic search altogether.
+
+Still open, deferred to the eval set below: whether `min_z=3.0`,
+`hub_lambda=0.5` and `min_pool_for_z=10` hold up as defaults once measured
+systematically rather than against 11 hand-picked queries, and whether
+`e5-base`/`bge-m3` change the picture enough to be worth their extra
+download size.
+
 ## Phase 3 — Agents
 
 - `org-glean_search` (evidence, coverage, freshness, granularity),
