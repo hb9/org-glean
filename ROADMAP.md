@@ -127,13 +127,62 @@ Met.
 - A small private judged query set (no-term-overlap, German↔English, file
   suggestion) and `org-glean-eval`, used to tune chunking/fusion and compare
   model presets — a regression/tuning tool, not an existence gate.
+- [x] `make test-model` (`test/org-glean-model-test.el`) implemented and
+      passing against a real installed `e5-small`: `org-glean-install`'s
+      self-test, cross-language German→English retrieval (a heading titled
+      "Schweißnahtprüfung Protokoll" is the top result for the query "weld
+      inspection"), a no-term-overlap query ("how is revenue trending"
+      correctly finds "Quarterly sales figures" with zero shared words),
+      and `org-glean-search-api` with `semantic` in modes end to end.
 
-**Exit:** a fresh Emacs plus one `org-glean-install` run produces relevant
-semantic results on a real corpus. Saves never block editing; lexical
-results reflect a save immediately, semantic coverage catches up in the
-background and is reported honestly (`"semantic: 97% covered"`, not a single
-stale/ready flag). Swapping to `bge-m3` re-embeds without breaking search,
-which stays fully usable throughout on lexical/exact evidence.
+**Exit: met.** `org-glean-install e5-small` succeeded end to end on this
+machine (venv, dependency install, ~470 MB ONNX download, self-test) after
+fixing two real bugs surfaced only by actually running it (below). A fresh
+Emacs plus that one install run now produces relevant semantic results on a
+real corpus, confirmed both manually and by `make test-model`: saves never
+block editing; lexical results reflect a save immediately, semantic
+coverage catches up in the background. Not yet true: coverage/freshness
+reporting is still a single per-model fraction
+(`:semantic-coverage-chunks`/`-total`), not the free-text "97% covered"
+framing this exit criterion originally imagined — that framing was always
+aspirational prose, not a field name; the actual per-chunk-fact mechanism
+behind it is real (phase 1, C1). Swapping models to confirm `bge-m3`
+re-embeds cleanly has not been tried yet.
+
+**Two real bugs found only by running the actual install against a real
+network and a real model, neither caught by the fake-embedder test suite:**
+
+1. **TLS verification failure in a proxied/sandboxed environment.**
+   `huggingface_hub` (via `httpx`) trusts only the bundled `certifi` CA
+   list by default, not the OS trust store; a MITM-proxied environment
+   (this dev sandbox, and plausibly many corporate networks) only has the
+   proxy's root CA in the OS store. Fixed in
+   `semantic/org_glean_download.py` by setting `SSL_CERT_FILE` to the
+   OS-reported default CA file (`ssl.get_default_verify_paths().cafile`)
+   before importing `huggingface_hub`, unless the user already set
+   `SSL_CERT_FILE` themselves.
+2. **Lossy BLOB round-trip through `sqlite-select`.** Emacs's `sqlite-select`
+   does not reliably return a BLOB column's exact original bytes: byte
+   sequences that happen to form valid UTF-8 are silently decoded into
+   fewer multibyte characters on the way back out, corrupting arbitrary
+   binary data (confirmed with a minimal repro: a 256-byte unibyte string
+   written to a BLOB column comes back as a *different*, longer-or-shorter
+   multibyte string; `string-to-unibyte` can only reverse this for the
+   subset of cases where every byte stayed a distinct raw "eight-bit"
+   pseudo-character, which real embedding vectors do not guarantee). This
+   only manifested once a *fresh* backend process needed to reload vectors
+   from SQLite (`org-glean--semantic-ensure-warm`'s warm-reload path,
+   e.g. after an Emacs restart) rather than serving them from the
+   in-memory cache a same-session embedding batch had just populated via
+   `load` — which is exactly why the ERT suite's fake-backend tests never
+   hit it. Fixed by never decoding vectors to raw bytes at all: `vectors.vector`
+   now stores the base64 ASCII text itself (immune to the corruption,
+   since ASCII bytes round-trip identically regardless of unibyte/
+   multibyte flag), forwarded verbatim on reload instead of decode-then-
+   re-encode. A new ERT regression test
+   (`org-glean-test-semantic-provider-survives-backend-restart`) forces
+   exactly this reload path with the fake backend so this class of bug is
+   now caught without needing a real model.
 
 ## Phase 2 — Hybrid quality
 
@@ -190,10 +239,13 @@ which stays fully usable throughout on lexical/exact evidence.
 - **Synchronous semantic queries.** `org-glean--semantic-search-provider`
   uses `org-glean--embed-request-sync` (a blocking call with a timeout),
   because `org-glean-search-api` is itself a synchronous function that
-  returns a value rather than taking a callback. For a warm backend over a
-  local pipe with a corpus-sized vector set this should be fast, but it is
-  not the fully asynchronous query path phase 1 originally described. An
-  async picker would need `org-glean-search-api` (or a new sibling) to grow
-  a callback-based variant; revisit once real usage shows the synchronous
-  path is actually too slow, rather than restructuring the search API
-  speculatively.
+  returns a value rather than taking a callback. Measured against the real
+  e5-small model on a 3-file/6-chunk corpus: under a second per query
+  including a cold warm-reload from SQLite (`make test-model`'s wall time
+  is dominated by three separate reconcile+embed+query cycles, not by any
+  single query). This is not evidence about a real multi-thousand-chunk
+  corpus's warm-reload or per-query cost, but it is not the "might be too
+  slow" hedge either. An async picker would need `org-glean-search-api`
+  (or a new sibling) to grow a callback-based variant; revisit once real
+  usage on a real-sized corpus shows the synchronous path is actually too
+  slow, rather than restructuring the search API speculatively.

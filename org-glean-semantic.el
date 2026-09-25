@@ -49,17 +49,23 @@ Distinct on text-digest: two chunks that happen to share identical content
 
 (defun org-glean--semantic-store-vectors (db model-id digests vectors-b64)
   "Write MODEL-ID vectors for DIGESTS from base64-encoded VECTORS-B64.
-Vectors are stored as raw BLOBs (Emacs sqlite treats a unibyte string
-parameter as BLOB), one transaction per batch."
+Stored as the base64 ASCII text itself, never decoded to raw bytes: Emacs's
+`sqlite-select' does not reliably round-trip an arbitrary binary string
+through a BLOB column (bytes that happen to form valid UTF-8 sequences can
+be silently merged/reinterpreted as multibyte characters on the way back
+out, corrupting the vector). Base64 text is pure ASCII, so it round-trips
+byte-for-byte regardless of that behavior; the backend already expects
+base64 on the wire anyway, so no re-encoding is needed when this is later
+reloaded (see `org-glean--semantic-ensure-warm')."
   (sqlite-transaction db)
   (condition-case err
       (progn
         (cl-loop for digest in digests
                  for vector-b64 across vectors-b64
-                 do (let ((blob (base64-decode-string vector-b64)))
+                 do (let ((dim (/ (length (base64-decode-string vector-b64)) 4)))
                       (sqlite-execute
                        db "INSERT OR REPLACE INTO vectors(model_id,text_digest,dim,vector) VALUES(?,?,?,?)"
-                       (vector model-id digest (/ (length blob) 4) blob))))
+                       (vector model-id digest dim vector-b64))))
         (sqlite-commit db))
     (error (sqlite-rollback db) (signal (car err) (cdr err)))))
 
@@ -87,16 +93,18 @@ repeated searches within one session are not."
                        (vector model page-size offset))))
             (when rows
               (org-glean--embed-request-sync
+               ;; `vector' is already the base64 text org-glean--semantic-store-vectors
+               ;; wrote; forward it verbatim rather than decoding and re-encoding, which
+               ;; would round-trip the value through sqlite-select's lossy blob handling.
                "load"
                `((items . ,(vconcat
-                           (mapcar (lambda (row)
-                                     `((digest . ,(car row))
-                                       (vector . ,(base64-encode-string (cadr row) t))))
+                           (mapcar (lambda (row) `((digest . ,(car row)) (vector . ,(cadr row))))
                                    rows))))
                model))
             (setq offset (+ offset (length rows))
                   done (< (length rows) page-size)))))
       (process-put process 'org-glean-semantic-warm t))))
+
 
 (defun org-glean--semantic-queue-process-batch (&optional callback)
   "Embed one pending batch for the active model, asynchronously.

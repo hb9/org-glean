@@ -13,7 +13,9 @@ model and its approximate size - never implicitly from ordinary search.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import ssl
 import sys
 from pathlib import Path
 
@@ -29,6 +31,26 @@ TOKENIZER_FILES = [
 ]
 
 
+def _ensure_system_ca_bundle_is_trusted() -> None:
+    """Make huggingface_hub's HTTP client trust the OS CA bundle.
+
+    huggingface_hub (via httpx) verifies TLS against the bundled `certifi`
+    root list by default rather than the OS trust store, unlike `curl` and
+    a plain `ssl.create_default_context()`. On a machine where outbound
+    HTTPS is intercepted by a corporate or sandbox proxy - common in CI and
+    dev-container setups - the proxy's root certificate is only in the OS
+    store, so certifi-only verification fails with CERTIFICATE_VERIFY_FAILED
+    even though the connection is otherwise fine. Respect any CA bundle the
+    user has already configured (SSL_CERT_FILE); only fall back to the
+    OS-reported default when nothing is set.
+    """
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    cafile = ssl.get_default_verify_paths().cafile
+    if cafile and Path(cafile).exists():
+        os.environ["SSL_CERT_FILE"] = cafile
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: org_glean_download.py PRESET TARGET_DIR", file=sys.stderr)
@@ -40,6 +62,7 @@ def main() -> int:
         return 2
     preset = presets[preset_name]
 
+    _ensure_system_ca_bundle_is_trusted()
     from huggingface_hub import hf_hub_download
 
     target_dir.mkdir(parents=True, exist_ok=True)

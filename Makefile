@@ -27,11 +27,13 @@ compile:
 	@$(MAKE) clean
 
 # Opt-in suite exercising a real installed embedding model (no
-# ORG_GLEAN_FAKE_EMBED). Requires `org-glean-install` to have run first; see
-# ROADMAP.md phase 1, C4.
+# ORG_GLEAN_FAKE_EMBED). Requires `org-glean-install' to have run first; see
+# ROADMAP.md phase 1, C4. ORG_GLEAN_MODEL_TEST_VENV overrides the venv dir
+# if it is not the default (~/.config/emacs/.local/cache/org-glean or
+# equivalent for your user-emacs-directory).
 test-model:
-	@echo "test-model: org-glean-install (C4) not implemented yet; nothing to test against"
-	@exit 1
+	$(EMACS) --batch -Q -L . -L test -l test/org-glean-model-test.el \
+		-f ert-run-tests-batch-and-exit
 
 clean:
 	rm -f *.elc semantic/*.elc

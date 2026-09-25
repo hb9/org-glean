@@ -1037,6 +1037,36 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (cl-every (lambda (item) (memq (alist-get :source-current item) '(t nil)))
                           items))))))
 
+(ert-deftest org-glean-test-semantic-provider-survives-backend-restart ()
+  ;; Regression test: org-glean--semantic-ensure-warm reloads every stored
+  ;; vector from SQLite into a fresh backend process. A vector's `vector'
+  ;; column must round-trip byte-for-byte through sqlite-select for this to
+  ;; work; storing it as decoded raw bytes previously corrupted it (Emacs's
+  ;; sqlite reader can silently merge/reinterpret arbitrary binary BLOB
+  ;; bytes as if they were UTF-8), which only ever showed up once a fresh
+  ;; process actually needed to reload from SQL rather than from the batch
+  ;; that had just embedded and loaded it directly. Storing the base64 TEXT
+  ;; itself (pure ASCII, immune to that corruption) fixed it; this test
+  ;; forces exactly that reload path.
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "weld.org" root)
+                             "* Weld inspection procedure\ncheck the seam\n")
+      (org-glean-test--write (expand-file-name "sales.org" root)
+                             "* Quarterly sales report\ntotally unrelated content\n")
+      (org-glean-reconcile)
+      (let (done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+        (should (org-glean-test--wait-for (lambda () done))))
+      ;; Force a brand new backend process with an empty in-memory cache,
+      ;; so the next search can only succeed via the SQL reload path.
+      (org-glean-embed-stop)
+      (let ((items (org-glean--semantic-search-provider "weld inspection" nil 5)))
+        (should items)
+        (should (cl-some (lambda (item) (equal "Weld inspection procedure"
+                                               (alist-get :title item)))
+                         items))))))
+
 (ert-deftest org-glean-test-semantic-provider-errors-when-not-installed ()
   (org-glean-test--corpus
     (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
