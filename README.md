@@ -47,12 +47,21 @@ time and errors. `org-glean-show-errors` opens a buffer with the latest
 reconciliation and search-provider failures.
 
 `org-glean-search-api` accepts an explicit `MODES` list among `exact`,
-`lexical`, `fuzzy` and `semantic`. `semantic` is a recognized mode name today,
-but no semantic provider ships yet — requesting it is honestly reported as
-`provider-errors` rather than silently dropped or served by another provider
-(`org-glean-semantic-provider` defaults to nil; see `ROADMAP.md` phase 1 for
-the planned local ONNX-based backend, with no PyTorch and no third-party
-embedding library dependency).
+`lexical`, `fuzzy` and `semantic`. Semantic search is local: install a
+model once with `M-x org-glean-install` (default `e5-small`, swappable via
+`org-glean-semantic-model` to `e5-base` or `bge-m3`), which creates a
+package-private `uv` environment, asks for one explicit consent naming the
+model and its approximate download size, and runs a self-test before
+reporting success. Once installed, `semantic` mode returns targets ranked
+by embedding similarity to the query — useful precisely when the right
+file or heading shares no words with what you searched for. Saves and
+reconciliation queue a background embedding pass automatically
+(`org-glean-semantic-pause`/`-resume` to control it); requesting `semantic`
+before the model is installed, or while a query genuinely fails, is
+honestly reported via `provider-errors` rather than silently dropped or
+served from another provider's results. No PyTorch and no third-party
+embedding library: the backend is our own `onnxruntime` + `tokenizers`
+wrapper (see `ROADMAP.md` phase 1).
 
 With `rhblind/emacs-mcp-server` installed, load `org-glean-mcp.el` to register
 the read-only `org-glean_search` tool. Set `org-glean-mcp-allowed-roots` to the

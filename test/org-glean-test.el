@@ -124,7 +124,7 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (should (= 1 (plist-get status :indexed-sources)))
       (should (= 2 (plist-get status :indexed-targets)))
       (should (plist-get status :last-reconcile-at))
-      (should (eq 'unavailable (plist-get status :semantic-state)))
+      (should (eq 'not-installed (plist-get status :semantic-state)))
       (should (equal "e5-small" (plist-get status :semantic-model)))
       (should (= 0 (plist-get status :semantic-coverage-chunks)))
       (should (= 2 (plist-get status :semantic-coverage-total))))))
@@ -1006,6 +1006,57 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (org-glean-reconcile)
       (should (memq (plist-get (org-glean-status) :semantic-queue-state)
                     '(idle running paused))))))
+
+(ert-deftest org-glean-test-status-semantic-state-reflects-install-and-provider ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
+    (org-glean-reconcile)
+    (should (eq 'not-installed (plist-get (org-glean-status) :semantic-state)))
+    (let ((org-glean-semantic-provider nil))
+      (should (eq 'unavailable (plist-get (org-glean-status) :semantic-state))))
+    (org-glean-test--fake-backend
+      (should (eq 'ready (plist-get (org-glean-status) :semantic-state))))))
+
+(ert-deftest org-glean-test-semantic-provider-returns-matching-targets ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "weld.org" root)
+                             "* Weld inspection procedure\ncheck the seam\n")
+      (org-glean-test--write (expand-file-name "sales.org" root)
+                             "* Quarterly sales report\ntotally unrelated content\n")
+      (org-glean-reconcile)
+      (let (done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+        (should (org-glean-test--wait-for (lambda () done))))
+      (let ((items (org-glean--semantic-search-provider "weld inspection" nil 5)))
+        (should items)
+        (should (cl-some (lambda (item) (equal "Weld inspection procedure"
+                                               (alist-get :title item)))
+                         items))
+        (should (cl-every (lambda (item) (alist-get :score item)) items))
+        (should (cl-every (lambda (item) (memq (alist-get :source-current item) '(t nil)))
+                          items))))))
+
+(ert-deftest org-glean-test-semantic-provider-errors-when-not-installed ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody\n")
+    (org-glean-reconcile)
+    (should-error (org-glean--semantic-search-provider "anything" nil 5))))
+
+(ert-deftest org-glean-test-search-api-semantic-mode-succeeds-when-installed ()
+  (org-glean-test--corpus
+    (org-glean-test--fake-backend
+      (org-glean-test--write (expand-file-name "weld.org" root)
+                             "* Weld inspection procedure\ncheck the seam\n")
+      (org-glean-reconcile)
+      (let (done)
+        (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
+        (should (org-glean-test--wait-for (lambda () done))))
+      (let ((response (org-glean-search-api "weld inspection" 5 nil nil
+                                            '(exact lexical semantic))))
+        (should (eq t (alist-get 'semantic (alist-get 'requested response))))
+        (should (memq 'semantic (alist-get 'used response)))
+        (should (= 0 (length (alist-get 'provider-errors response))))))))
 
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

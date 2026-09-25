@@ -212,7 +212,10 @@ reported and preserved; a failed tree walk never deletes indexed sources."
                        :indexed-targets (plist-get counts :targets)
                        :last-reconcile-at org-glean--last-reconcile-at
                        :last-reconcile-counts org-glean--last-reconcile-counts
-                       :semantic-state (if org-glean-semantic-provider 'ready 'unavailable)
+                       :semantic-state (cond
+                                        ((not org-glean-semantic-provider) 'unavailable)
+                                        ((org-glean-embed-available-p org-glean-semantic-model) 'ready)
+                                        (t 'not-installed))
                        :semantic-model org-glean-semantic-model
                        :semantic-coverage-chunks (car coverage)
                        :semantic-coverage-total (cdr coverage)

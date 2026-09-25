@@ -63,6 +63,41 @@ parameter as BLOB), one transaction per batch."
         (sqlite-commit db))
     (error (sqlite-rollback db) (signal (car err) (cdr err)))))
 
+(defcustom org-glean-semantic-warm-page-size 200
+  "Vectors reloaded per `load' call when warming a fresh backend process.
+Only relevant right after a backend (re)start, e.g. after an Emacs restart:
+the backend's in-memory scoring cache starts empty even though the SQLite
+`vectors' table is fully populated, so it must be repopulated once before
+`search' can see anything."
+  :type 'integer
+  :group 'org-glean)
+
+(defun org-glean--semantic-ensure-warm (db model)
+  "Ensure the backend process for MODEL holds every DB vector in memory.
+A no-op once done for the lifetime of the current backend process: the
+warm flag is stored on the process object itself via `process-put', so a
+backend restart (which gets a new process object) is warmed again, but
+repeated searches within one session are not."
+  (let ((process (org-glean--embed-start-process model)))
+    (unless (process-get process 'org-glean-semantic-warm)
+      (let ((offset 0) (page-size org-glean-semantic-warm-page-size) done)
+        (while (not done)
+          (let ((rows (sqlite-select
+                       db "SELECT text_digest,vector FROM vectors WHERE model_id = ? LIMIT ? OFFSET ?"
+                       (vector model page-size offset))))
+            (when rows
+              (org-glean--embed-request-sync
+               "load"
+               `((items . ,(vconcat
+                           (mapcar (lambda (row)
+                                     `((digest . ,(car row))
+                                       (vector . ,(base64-encode-string (cadr row) t))))
+                                   rows))))
+               model))
+            (setq offset (+ offset (length rows))
+                  done (< (length rows) page-size)))))
+      (process-put process 'org-glean-semantic-warm t))))
+
 (defun org-glean--semantic-queue-process-batch (&optional callback)
   "Embed one pending batch for the active model, asynchronously.
 CALLBACK, when given, is called with the number of chunks embedded in this

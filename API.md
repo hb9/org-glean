@@ -82,22 +82,29 @@ otherwise-unchanged passage. `org-glean--replace` rewrites a source's
 ```elisp
 (:schema-version 1
  :text STRING
- :modes (exact lexical fuzzy semantic)  ; semantic is reserved: see below
+ :modes (exact lexical fuzzy semantic)
  :roots ROOT-ID-LIST         ; nil means configured roots for local Lisp calls
- :kinds (file heading ...)   ; planned phase 1: chunk granularity selector
+ :kinds (file heading ...)   ; planned phase 2: chunk/heading/file granularity
  :filters FILTER-PLIST
  :limit INTEGER
  :purpose SYMBOL-OR-NIL)
 ```
 
 Generic filters include `:allowed-roots`, `:exclude-property-values`,
-`:property-equals`, `:max-heading-level`, and `:exclude-titles`. They are applied
-before the caller-visible result limit. `semantic` is an implemented mode name
-in the request/response contract, but no semantic provider ships yet:
-requesting it is honestly reported as unavailable via `provider-errors`
-(`org-glean-semantic-provider` defaults to nil). See `ROADMAP.md` phase 1 for
-the planned chunk-based semantic backend. Unsupported modes or filter
-operators must be reported, never silently treated as applied.
+`:property-equals`, `:max-heading-level`, and `:exclude-titles`. They are
+applied before the caller-visible result limit for every mode, including
+`semantic`. Requesting `semantic` when `org-glean-semantic-provider` is nil,
+or when it is configured but the active model is not installed
+(`M-x org-glean-install`), is honestly reported as unavailable via
+`provider-errors` — never silently dropped, never served from another
+provider's results. When the model is installed, `semantic` returns
+targets whose owning chunk best matches the query by embedding similarity,
+aggregated by max score per target (see `ROADMAP.md` phase 1 for the
+chunk-to-target aggregation and phase 2 for planned chunk/heading/file
+granularity and calibrated rank fusion; today, ordering across modes is
+still priority-tier: exact, then lexical, then semantic, then fuzzy).
+Unsupported modes or filter operators must be reported, never silently
+treated as applied.
 
 ### Result (current API v1)
 
@@ -166,9 +173,12 @@ of `ready`, `degraded`, or `unavailable` (`indexing` is reserved for a planned
 asynchronous reconciliation path; the current synchronous
 `org-glean-reconcile` runs to completion before returning). Optional fields
 report configured roots, indexed source/target counts, last reconciliation
-time and counts, and recorded errors. `:semantic-state` is `ready` when
-`org-glean-semantic-provider` is configured, `unavailable` otherwise (no
-provider ships yet; see `ROADMAP.md` phase 1). `:semantic-model` names the
+time and counts, and recorded errors. `:semantic-state` is `unavailable` if
+`org-glean-semantic-provider` is nil (no provider function at all), `ready`
+if a provider is configured and the active model's backend is installed
+(`org-glean-embed-available-p`), or `not-installed` if a provider is
+configured but the model has not been installed yet (run
+`M-x org-glean-install`). `:semantic-model` names the
 active preset (`org-glean-semantic-model`, default `"e5-small"`).
 `:semantic-coverage-chunks`/`:semantic-coverage-total` report how many of the
 index's chunks have a vector for the active model — a per-chunk fact, never

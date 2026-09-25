@@ -95,10 +95,30 @@ Met.
       `running`/`paused`. `org-glean-install-hook` (run after a passing
       self-test) starts the queue immediately after a fresh install,
       without needing a require cycle back into org-glean-embed.el.
-- Asynchronous semantic query with in-memory backend-held vectors and
-  structural prefiltering (no per-query key-list shipping); a synchronous
-  wrapper with a timeout for MCP/batch callers.
-- Aggregation from chunk → heading → file, caller-selected granularity.
+- [x] Semantic provider (`org-glean--semantic-search-provider` in
+      `org-glean-search.el`, registered as `org-glean-semantic-provider`'s
+      default the moment the file loads, unless something already
+      customized the hook away): embeds the query with a synchronous
+      request, warms a fresh backend process from SQLite first
+      (`org-glean--semantic-ensure-warm`, paged so an Emacs restart doesn't
+      need to re-embed anything, only reload), asks the backend for
+      `k = clamp(5×limit, 50, 200)` chunk hits, aggregates chunk hits up to
+      their owning target by max score (deduping is free: the backend
+      already returns hits sorted descending, so a target's first hit is
+      its best chunk), applies the same generic filters every other
+      provider applies, and returns at most `limit` items. Missing
+      installation surfaces as a normal provider error
+      (`provider-errors`), exactly like a lexical or fuzzy provider
+      failure — never a crash, never silently empty. `:semantic-state` in
+      `org-glean-status` now distinguishes `unavailable` (no provider at
+      all), `not-installed` (provider configured, model not installed) and
+      `ready` (installed and warmable). Result ordering places `semantic`
+      between `lexical` and `fuzzy` (still priority-tier ordering, not
+      calibrated fusion — that is phase 2's `RRF` work below). File- and
+      caller-selected chunk/heading/file granularity is not yet
+      implemented: a semantic hit always resolves to its exact owning
+      target (file record or heading record), which is a strict subset of
+      the planned aggregation.
 - Deterministic test coverage: a fake, hash-based backend for fast ERT runs,
   one real end-to-end test per process boundary (this was the gate that
   caught a real crash in the previous worker attempt — never skip it again),
@@ -167,3 +187,13 @@ which stays fully usable throughout on lexical/exact evidence.
   a rare, explicit, user-initiated action but not ideal for a large model on
   a slow connection. Convert to an async step chain if this proves
   disruptive in practice.
+- **Synchronous semantic queries.** `org-glean--semantic-search-provider`
+  uses `org-glean--embed-request-sync` (a blocking call with a timeout),
+  because `org-glean-search-api` is itself a synchronous function that
+  returns a value rather than taking a callback. For a warm backend over a
+  local pipe with a corpus-sized vector set this should be fast, but it is
+  not the fully asynchronous query path phase 1 originally described. An
+  async picker would need `org-glean-search-api` (or a new sibling) to grow
+  a callback-based variant; revisit once real usage shows the synchronous
+  path is actually too slow, rather than restructuring the search API
+  speculatively.

@@ -10,6 +10,7 @@
 
 (require 'org-glean-core)
 (require 'org-glean-store)
+(require 'org-glean-semantic)
 (require 'sqlite)
 (require 'cl-lib)
 (require 'subr-x)
@@ -163,6 +164,61 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
         (and (file-exists-p (alist-get :path item))
              (equal (alist-get :digest item) (org-glean--digest (alist-get :path item)))))
   item)
+
+(defun org-glean--semantic-chunk-hit-targets (db hits)
+  "Return (TARGET-KEY . SCORE) pairs from HITS, highest score first, deduped
+by owning target. HITS is a vector of alists with `digest' and `score',
+already sorted by the backend descending by score; the first hit seen for
+a given target is therefore its best-scoring chunk, so later duplicate
+occurrences of the same target are simply skipped rather than compared."
+  (let ((best (make-hash-table :test #'equal)) (order nil))
+    (cl-loop for hit across hits
+             for digest = (alist-get 'digest hit)
+             for score = (alist-get 'score hit)
+             for target-key = (caar (sqlite-select
+                                     db "SELECT target_key FROM chunks WHERE text_digest = ? LIMIT 1"
+                                     (vector digest)))
+             when (and target-key (not (gethash target-key best)))
+             do (progn (puthash target-key score best)
+                       (push target-key order)))
+    (mapcar (lambda (key) (cons key (gethash key best))) (nreverse order))))
+
+(defun org-glean--semantic-search-provider (query filters limit)
+  "Return generic typed semantic candidates for QUERY, FILTERS and LIMIT.
+Embeds QUERY, scores it against the backend's in-memory vectors (warming
+it from SQLite first if this is a fresh process), aggregates chunk hits up
+to their owning target by max score, applies FILTERS the same way every
+other provider does, and returns at most LIMIT target items with :score
+and :source-current set. Signals if the active model's backend is not
+installed; the caller (`org-glean-search-filtered') turns that into a
+`provider-errors' entry rather than a crash, exactly like any other
+provider's failure."
+  (let ((model org-glean-semantic-model)
+        (db (org-glean--db)))
+    (unless (org-glean-embed-available-p model)
+      (error "Semantic model %s is not installed; run M-x org-glean-install" model))
+    (org-glean--semantic-ensure-warm db model)
+    (let* ((response (org-glean--embed-request-sync
+                      "search" `((query . ,query) (k . ,(min 200 (max 50 (* limit 5)))))
+                      model))
+           (hits (or (alist-get 'results response) []))
+           (ranked (org-glean--semantic-chunk-hit-targets db hits))
+           (items nil))
+      (cl-loop for (target-key . score) in ranked
+               while (< (length items) limit)
+               do (let ((rows (sqlite-select
+                              db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE key = ?"
+                              (vector target-key))))
+                    (when (= (length rows) 1)
+                      (let ((item (car (org-glean--results rows))))
+                        (when (org-glean--eligible-p item filters)
+                          (setf (alist-get :score item) score
+                                (alist-get :source-current item)
+                                (and (file-exists-p (alist-get :path item))
+                                     (equal (alist-get :digest item)
+                                           (org-glean--digest (alist-get :path item)))))
+                          (push item items))))))
+      (nreverse items))))
 
 (defun org-glean-search-filtered (query limit fuzzy filters &optional modes)
   "Search QUERY, applying FILTERS and :allowed-roots before LIMIT.
@@ -321,9 +377,12 @@ served (for example `semantic' with no provider configured) is absent from
         (results . ,(vconcat results)))))
 
 (defun org-glean--result-sort-key (item)
-  "Return the results-buffer order key for ITEM."
+  "Return the results-buffer order key for ITEM.
+This is priority-tier ordering (exact, then lexical, then semantic, then
+fuzzy), not a calibrated fused score across providers; see ROADMAP.md
+phase 2 for deterministic rank fusion."
   (list (or (cdr (assq (alist-get :match-type item)
-                       '((exact . 0) (lexical . 1) (fuzzy . 2)))) 3)))
+                       '((exact . 0) (lexical . 1) (semantic . 2) (fuzzy . 3)))) 4)))
 
 (defun org-glean--relevance-before-p (left right)
   "Return non-nil if LEFT has higher display relevance than RIGHT."
@@ -337,6 +396,14 @@ served (for example `semantic' with no provider configured) is absent from
                  (or (alist-get :rank right) most-positive-fixnum))
             (> left-score right-score)))
       (< (car left-key) (car right-key)))))
+
+;; org-glean-semantic-provider defaults to nil (semantic mode explicitly
+;; unavailable) until this file defines a real implementation. Now that it
+;; does, wire it in as the default -- but only if nothing has already
+;; customized the hook, so an explicit nil (or a caller's own provider) is
+;; never silently overridden by loading this file.
+(unless org-glean-semantic-provider
+  (setq org-glean-semantic-provider #'org-glean--semantic-search-provider))
 
 (provide 'org-glean-search)
 ;;; org-glean-search.el ends here
