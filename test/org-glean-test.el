@@ -116,32 +116,34 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
 
 (ert-deftest org-glean-test-status-reports-index-and-reconcile-state ()
   (org-glean-test--corpus
-    (org-glean-test--write (expand-file-name "status.org" root) "* Status target\n")
-    (org-glean-reconcile)
-    (let ((status (org-glean-status)))
-      (should (= 1 (plist-get status :schema-version)))
-      (should (eq 'ready (plist-get status :state)))
-      (should (= 1 (plist-get status :indexed-sources)))
-      (should (= 2 (plist-get status :indexed-targets)))
-      (should (plist-get status :last-reconcile-at))
-      (should (eq 'not-installed (plist-get status :semantic-state)))
-      (should (equal "e5-small" (plist-get status :semantic-model)))
-      (should (= 0 (plist-get status :semantic-coverage-chunks)))
-      (should (= 2 (plist-get status :semantic-coverage-total))))))
+    (let ((org-glean-chunk-min-words 1))
+      (org-glean-test--write (expand-file-name "status.org" root) "* Status target\n")
+      (org-glean-reconcile)
+      (let ((status (org-glean-status)))
+        (should (= 1 (plist-get status :schema-version)))
+        (should (eq 'ready (plist-get status :state)))
+        (should (= 1 (plist-get status :indexed-sources)))
+        (should (= 2 (plist-get status :indexed-targets)))
+        (should (plist-get status :last-reconcile-at))
+        (should (eq 'not-installed (plist-get status :semantic-state)))
+        (should (equal "e5-small" (plist-get status :semantic-model)))
+        (should (= 0 (plist-get status :semantic-coverage-chunks)))
+        (should (= 2 (plist-get status :semantic-coverage-total)))))))
 
 (ert-deftest org-glean-test-reconcile-populates-chunks ()
   (org-glean-test--corpus
-    (org-glean-test--write (expand-file-name "chunk.org" root)
-                           "#+title: Chunked\n* Heading one\nbody text one\n* Heading two\nbody text two\n")
-    (org-glean-reconcile)
-    (let* ((db (org-glean--db))
-           (chunks (sqlite-select db "SELECT key,target_key,text,text_digest FROM chunks ORDER BY key")))
-      ;; One chunk per target: the file record plus each of the two headings.
-      (should (= 3 (length chunks)))
-      (dolist (row chunks)
-        (should (equal (concat (nth 1 row) "#chunk:0") (nth 0 row)))
-        (should (stringp (nth 2 row)))
-        (should (equal (org-glean--chunk-digest (nth 2 row)) (nth 3 row)))))))
+    (let ((org-glean-chunk-min-words 1))
+      (org-glean-test--write (expand-file-name "chunk.org" root)
+                             "#+title: Chunked\n* Heading one\nbody text one\n* Heading two\nbody text two\n")
+      (org-glean-reconcile)
+      (let* ((db (org-glean--db))
+             (chunks (sqlite-select db "SELECT key,target_key,text,text_digest FROM chunks ORDER BY key")))
+        ;; One chunk per target: the file record plus each of the two headings.
+        (should (= 3 (length chunks)))
+        (dolist (row chunks)
+          (should (equal (concat (nth 1 row) "#chunk:0") (nth 0 row)))
+          (should (stringp (nth 2 row)))
+          (should (equal (org-glean--chunk-digest (nth 2 row)) (nth 3 row))))))))
 
 (ert-deftest org-glean-test-migration-backfills-chunks-for-preexisting-targets ()
   ;; Regression test for a real bug found on a real, pre-chunking corpus:
@@ -155,27 +157,30 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
   ;; confirm opening it (which runs the v2->v3 backfill migration)
   ;; populates chunks without needing any source file to change.
   (org-glean-test--corpus
-    (org-glean-test--write (expand-file-name "note.org" root)
-                           "#+title: Old Corpus\n* Existing heading\nexisting body\n")
-    (org-glean-reconcile)
-    (let ((db (org-glean--db)))
-      ;; Simulate the incomplete v2 migration: chunks exist for this
-      ;; source right now (C1/C2 already populate them); wipe them and
-      ;; roll the schema version back to 2, exactly as a database migrated
-      ;; before the backfill fix would look.
-      (sqlite-execute db "DELETE FROM chunks")
-      (sqlite-execute db "PRAGMA user_version = 2")
-      (should (= 0 (caar (sqlite-select db "SELECT count(*) FROM chunks"))))
-      (org-glean-close)
-      (setq org-glean--database nil))
-    ;; Reopening the database (no file changes, no reconcile) must trigger
-    ;; the v2->v3 migration and backfill chunks from the stored targets.
-    (let* ((db (org-glean--db))
-           (chunks (sqlite-select db "SELECT key,target_key,text FROM chunks ORDER BY key")))
-      (should (= 3 (caar (sqlite-select db "PRAGMA user_version"))))
-      (should (= 2 (length chunks))) ; file record + one heading
-      (should (cl-some (lambda (row) (string-search "Existing heading" (nth 2 row))) chunks))
-      (should (cl-some (lambda (row) (string-search "existing body" (nth 2 row))) chunks)))))
+    (let ((org-glean-chunk-min-words 1))
+      (org-glean-test--write (expand-file-name "note.org" root)
+                             "#+title: Old Corpus\n* Existing heading\nexisting body\n")
+      (org-glean-reconcile)
+      (let ((db (org-glean--db)))
+        ;; Simulate the incomplete v2 migration: chunks exist for this
+        ;; source right now (C1/C2 already populate them); wipe them and
+        ;; roll the schema version back to 2, exactly as a database migrated
+        ;; before the backfill fix would look.
+        (sqlite-execute db "DELETE FROM chunks")
+        (sqlite-execute db "PRAGMA user_version = 2")
+        (should (= 0 (caar (sqlite-select db "SELECT count(*) FROM chunks"))))
+        (org-glean-close)
+        (setq org-glean--database nil))
+      ;; Reopening the database (no file changes, no reconcile) must trigger
+      ;; the v2->v3 (and v3->v4) migrations and backfill chunks from the
+      ;; stored targets.
+      (let* ((db (org-glean--db))
+             (chunks (sqlite-select db "SELECT key,target_key,text FROM chunks ORDER BY key")))
+        (should (= 4 (caar (sqlite-select db "PRAGMA user_version"))))
+        (should (= 2 (length chunks))) ; file record + one heading
+        (should (cl-some (lambda (row) (string-search "Existing heading" (nth 2 row))) chunks))
+        (should (cl-some (lambda (row) (string-search "existing body" (nth 2 row))) chunks))))))
+
 
 (ert-deftest org-glean-test-chunk-windows-splits-long-body-with-overlap ()
   (let* ((org-glean-chunk-max-chars 40)
@@ -211,7 +216,8 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
                   (list :kind "file" :title "File Title")))))
 
 (ert-deftest org-glean-test-chunk-record-text-includes-file-outline ()
-  (let* ((heading-a (list :key "a" :kind "heading" :title "Alpha" :level 1
+  (let* ((org-glean-chunk-min-words 1)
+         (heading-a (list :key "a" :kind "heading" :title "Alpha" :level 1
                           :outline-path '("Alpha") :body "alpha body"))
          (heading-b (list :key "b" :kind "heading" :title "Beta" :level 1
                           :outline-path '("Beta") :body "beta body"))
@@ -235,24 +241,71 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
            (chunk-b (car (org-glean--chunk-records records-moved))))
       (should (equal (plist-get chunk-a :text-digest) (plist-get chunk-b :text-digest))))))
 
+(ert-deftest org-glean-test-chunk-strip-noise-removes-urls-logbook-and-timestamps ()
+  (should (equal "" (org-glean--chunk-strip-noise "https://example.com/some/long/path?x=1")))
+  (should (equal "Text before  after"
+                 (org-glean--chunk-strip-noise
+                  "Text before State \"DONE\"       from \"TODO\"       [2026-09-16 Wed 21:26] after")))
+  (should (equal "Text before  after"
+                 (org-glean--chunk-strip-noise "Text before [2026-01-01 Thu 09:00] after"))))
+
+(ert-deftest org-glean-test-chunk-word-count-counts-real-words-only ()
+  (should (= 0 (org-glean--chunk-word-count "")))
+  (should (= 0 (org-glean--chunk-word-count "12 34 a an")))
+  (should (= 3 (org-glean--chunk-word-count "one two three")))
+  ;; org-glean--chunk-word-count is a raw counter; it does not itself strip
+  ;; URLs (so "https"/"com" count too) - that is org-glean--chunk-strip-noise's
+  ;; job, always applied first in the real chunking pipeline.
+  (should (= 4 (org-glean--chunk-word-count "https://x.com real word")))
+  (should (= 2 (org-glean--chunk-word-count
+               (org-glean--chunk-strip-noise "https://x.com real word")))))
+
+(ert-deftest org-glean-test-chunk-drops-below-minimum-word-content ()
+  (let* ((org-glean-chunk-min-words 6)
+         (bare (list :key "bare" :kind "heading" :title "May"
+                    :outline-path '("2024" "May") :body ""))
+         (records (list bare)))
+    (should (null (org-glean--chunk-record bare records)))))
+
+(ert-deftest org-glean-test-chunk-keeps-content-clearing-minimum-words ()
+  (let* ((org-glean-chunk-min-words 6)
+         (rich (list :key "rich" :kind "heading" :title "Favorite recipe"
+                    :outline-path '("Recipes" "Favorite recipe")
+                    :body "Combine the ground beef with breadcrumbs and seasoning, then form patties before grilling."))
+         (records (list rich)))
+    (should (= 1 (length (org-glean--chunk-record rich records))))))
+
+(ert-deftest org-glean-test-chunk-short-heading-borrows-file-title ()
+  (let* ((org-glean-chunk-min-words 6)
+         (file-record (list :key "f" :kind "file" :title "Kitchen Notebook"
+                            :body "assorted cooking references"))
+         (thin (list :key "thin" :kind "heading" :title "Tips"
+                     :outline-path '("Tips") :body "use fresh herbs"))
+         (records (list file-record thin))
+         (chunks (org-glean--chunk-record thin records)))
+    (should (= 1 (length chunks)))
+    (should (string-search "Kitchen Notebook" (plist-get (car chunks) :text)))))
+
 (ert-deftest org-glean-test-unchanged-reconcile-keeps-chunk-vector ()
   (org-glean-test--corpus
-    (org-glean-test--write (expand-file-name "vector.org" root) "* Stable heading\nstable body\n")
-    (org-glean-reconcile)
-    (let* ((db (org-glean--db))
-           (digest (caar (sqlite-select
-                          db "SELECT text_digest FROM chunks WHERE target_key LIKE '%heading%' LIMIT 1"))))
-      (sqlite-execute db "INSERT INTO vectors(model_id,text_digest,dim,vector) VALUES(?,?,?,?)"
-                      (vector "fixture-model" digest 3 (unibyte-string 0 0 0)))
-      (should (equal (cons 1 2) (org-glean--semantic-coverage db "fixture-model")))
-      ;; Reconcile again with nothing changed; the vector must survive because
-      ;; org-glean--replace never touches `vectors', only `chunks'.
+    (let ((org-glean-chunk-min-words 1))
+      (org-glean-test--write (expand-file-name "vector.org" root) "* Stable heading\nstable body\n")
       (org-glean-reconcile)
-      (should (equal (cons 1 2) (org-glean--semantic-coverage db "fixture-model"))))))
+      (let* ((db (org-glean--db))
+             (digest (caar (sqlite-select
+                            db "SELECT text_digest FROM chunks WHERE target_key LIKE '%heading%' LIMIT 1"))))
+        (sqlite-execute db "INSERT INTO vectors(model_id,text_digest,dim,vector) VALUES(?,?,?,?)"
+                        (vector "fixture-model" digest 3 (unibyte-string 0 0 0)))
+        (should (equal (cons 1 2) (org-glean--semantic-coverage db "fixture-model")))
+        ;; Reconcile again with nothing changed; the vector must survive because
+        ;; org-glean--replace never touches `vectors', only `chunks'.
+        (org-glean-reconcile)
+        (should (equal (cons 1 2) (org-glean--semantic-coverage db "fixture-model")))))))
 
 (ert-deftest org-glean-test-removed-source-deletes-its-chunks ()
   (org-glean-test--corpus
-    (let ((path (expand-file-name "removeme.org" root)))
+    (let ((org-glean-chunk-min-words 1)
+          (path (expand-file-name "removeme.org" root)))
       (org-glean-test--write path "* Doomed\nbody\n")
       (org-glean-reconcile)
       (should (> (caar (sqlite-select (org-glean--db) "SELECT count(*) FROM chunks")) 0))
@@ -980,8 +1033,9 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
 (ert-deftest org-glean-test-semantic-queue-embeds-pending-chunks-in-a-batch ()
   (org-glean-test--corpus
     (org-glean-test--fake-backend
-      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
-      (org-glean-reconcile)
+      (let ((org-glean-chunk-min-words 1))
+        (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
+        (org-glean-reconcile))
       (let* ((db (org-glean--db))
              (before (org-glean--semantic-coverage db "e5-small")))
         (should (= 0 (car before)))
@@ -1009,8 +1063,9 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
 (ert-deftest org-glean-test-semantic-queue-skips-batch-while-one-in-flight ()
   (org-glean-test--corpus
     (org-glean-test--fake-backend
-      (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
-      (org-glean-reconcile)
+      (let ((org-glean-chunk-min-words 1))
+        (org-glean-test--write (expand-file-name "note.org" root) "* Heading\nbody text\n")
+        (org-glean-reconcile))
       (let (first-done second-done)
         (org-glean--semantic-queue-process-batch (lambda (n) (setq first-done n)))
         ;; A second call while the first is still in flight must not race it.

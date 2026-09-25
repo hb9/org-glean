@@ -81,6 +81,19 @@ semantic materialization; it never touches `targets' or `sources'."
             ;; original Org files.
             (org-glean--backfill-chunks db)
             (sqlite-execute db "PRAGMA user_version = 3"))
+          (when (< version 4)
+            ;; Chunking gained noise stripping (URLs, Org log-book lines,
+            ;; bare timestamps) and a minimum-content filter
+            ;; (`org-glean-chunk-min-words'): on a real corpus, roughly 13%
+            ;; of chunks were bare link lists or hour-log entries that
+            ;; still occupied semantic search result slots indistinguishable
+            ;; from real content. Re-chunk everything so pre-existing
+            ;; databases get the same cleanup as a freshly reconciled one;
+            ;; old vectors for text that no longer exists as a chunk simply
+            ;; go unused (vectors are keyed on content digest, never deleted
+            ;; by a chunk rebuild).
+            (org-glean--backfill-chunks db)
+            (sqlite-execute db "PRAGMA user_version = 4"))
           (sqlite-commit db)
           t)
       (error
@@ -88,9 +101,13 @@ semantic materialization; it never touches `targets' or `sources'."
        (signal (car err) (cdr err))))))
 
 (defun org-glean--backfill-chunks (db)
-  "Populate `chunks' for every target in DB lacking one, grouped by source.
+  "Rebuild `chunks' for every target in DB from scratch, grouped by source.
 Reconstructs the record plists `org-glean--chunk-records' expects directly
-from the `targets' table, so this never needs the original Org files."
+from the `targets' table, so this never needs the original Org files.
+Deletes all existing chunk rows first: this is also used to re-chunk after
+a chunking-logic change (e.g. a new noise filter dropping windows that
+used to exist), where stale rows under old keys would otherwise linger."
+  (sqlite-execute db "DELETE FROM chunks")
   (let ((by-path (make-hash-table :test #'equal)))
     (dolist (row (sqlite-select
                   db "SELECT key,path,kind,title,body,org_id,position,digest,capture_policy,level,outline_path,properties FROM targets ORDER BY path,position"))

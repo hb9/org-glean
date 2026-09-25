@@ -37,6 +37,36 @@ ROADMAP.md phase 1)."
   :type 'integer
   :group 'org-glean)
 
+(defcustom org-glean-chunk-min-words 6
+  "Minimum real words a chunk's passage must have after noise is stripped.
+A chunk below this threshold is not embedded at all: measured on a real
+corpus, about 13% of chunks were bare URL lists, Org log-book lines
+(\"State \\\"DONE\\\" from ... [timestamp]\"), or hour tables with no
+retrievable meaning, and they still consumed semantic search result slots
+indistinguishable from real content. Lexical search is unaffected: it
+indexes `targets', not `chunks', and still returns everything.
+A \"real word\" is 3+ letters (rough but locale-tolerant with `chunk-max-chars')."
+  :type 'integer
+  :group 'org-glean)
+
+(defun org-glean--chunk-strip-noise (text)
+  "Remove URLs, Org log-book lines and bare timestamps from TEXT.
+This only affects what gets embedded; the stored target body (and hence
+lexical/exact search) is untouched. These forms carry near-zero semantic
+meaning but are common enough in real Org files (link-only headings, time
+logs) to otherwise dominate a chunk's content and its resulting vector."
+  (let ((text (or text "")))
+    (setq text (replace-regexp-in-string "https?://[^ \t\n]+" "" text))
+    (setq text (replace-regexp-in-string
+               "State \"[A-Za-z]+\"\\( +from +\"[A-Za-z]*\"\\)? *\\(\\[[^]]*\\]\\)?" "" text))
+    (setq text (replace-regexp-in-string "\\[[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^]]*\\]" "" text))
+    (string-trim text)))
+
+(defun org-glean--chunk-word-count (text)
+  "Return the number of 3+ letter words in TEXT."
+  (length (seq-filter (lambda (w) (>= (length w) 3))
+                      (split-string text "[^[:alpha:]]+" t))))
+
 (defun org-glean--chunk-digest (text)
   "Return the content digest for chunk TEXT, keying its vector cache entry."
   (secure-hash 'sha256 (encode-coding-string (string-trim text) 'utf-8)))
@@ -103,28 +133,41 @@ duplicate of every heading's own passage."
    "\n"))
 
 (defun org-glean--chunk-record-text (record records)
-  "Return the full un-windowed passage text for RECORD among sibling RECORDS."
-  (if (equal (plist-get record :kind) "file")
-      (string-join
-       (delq nil (list (plist-get record :title)
-                       (org-glean--chunk-file-outline records)
-                       (plist-get record :body)))
-       "\n")
-    (string-join
-     (delq nil (list (org-glean--chunk-context-line record)
-                     (plist-get record :body)))
-     "\n\n")))
+  "Return the full un-windowed passage text for RECORD among sibling RECORDS.
+Body text has URLs, log-book lines and bare timestamps stripped (see
+`org-glean--chunk-strip-noise'); if what remains is too short to be
+retrievable on its own, a heading's file title is folded in as extra
+context (see `org-glean-chunk-min-words')."
+  (let ((body (org-glean--chunk-strip-noise (plist-get record :body))))
+    (if (equal (plist-get record :kind) "file")
+        (string-join
+         (delq nil (list (plist-get record :title)
+                         (org-glean--chunk-file-outline records)
+                         body))
+         "\n")
+      (let* ((context (org-glean--chunk-context-line record))
+             (words (org-glean--chunk-word-count (concat context " " body)))
+             (file-title (and (< words org-glean-chunk-min-words)
+                              (plist-get
+                               (cl-find "file" records
+                                        :key (lambda (r) (plist-get r :kind)) :test #'equal)
+                               :title))))
+        (string-join (delq nil (list file-title context body)) "\n\n")))))
 
 (defun org-glean--chunk-record (record records)
   "Return a list of chunk plists (:ord :text :text-digest) for RECORD.
 RECORDS are RECORD's siblings from the same source, used to build the
 file-level record's outline summary. A record with no retrievable text
 (after trimming) yields no chunks at all, rather than an empty-passage
-vector that would only ever score as noise."
+vector that would only ever score as noise. Likewise, a record whose
+noise-stripped text falls below `org-glean-chunk-min-words' yields no
+chunks: it is still fully lexically searchable via `targets', it just
+never becomes a semantic search candidate."
   (let* ((text (org-glean--chunk-record-text record records))
          (windows (org-glean--chunk-windows text)))
     (cl-loop for window in windows
              for ord from 0
+             when (>= (org-glean--chunk-word-count window) org-glean-chunk-min-words)
              collect (list :ord ord :text window
                            :text-digest (org-glean--chunk-digest window)))))
 
