@@ -1118,12 +1118,12 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (should (eq 'ready (plist-get (org-glean-status) :semantic-state))))))
 
 (ert-deftest org-glean-test-semantic-provider-returns-matching-targets ()
-  ;; org-glean-semantic-min-z's production default (3.0) is unreachable by
-  ;; construction with only two candidates -- the population z-score of the
-  ;; higher of exactly two points is always exactly 1.0 -- so it is bound to
-  ;; nil here to exercise the provider's own mechanics rather than the
-  ;; z-threshold, which is covered on its own terms in
-  ;; `test/test_embed_backend.py'.
+  ;; This corpus only has two candidate chunks. org-glean-semantic-min-z's
+  ;; production default (3.0) would be unreachable by construction at that
+  ;; pool size -- the population z-score of the higher of exactly two
+  ;; points is always exactly 1.0 -- but the backend's min_pool_for_z guard
+  ;; (see semantic/org_glean_embed.py) means min_z is simply not applied
+  ;; below its floor, so the real, unmodified default is exercised here.
   (org-glean-test--corpus
     (org-glean-test--fake-backend
       (org-glean-test--write (expand-file-name "weld.org" root)
@@ -1134,8 +1134,7 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (let (done)
         (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
         (should (org-glean-test--wait-for (lambda () done))))
-      (let* ((org-glean-semantic-min-z nil)
-             (items (org-glean--semantic-search-provider "weld inspection" nil 5)))
+      (let* ((items (org-glean--semantic-search-provider "weld inspection" nil 5)))
         (should items)
         (should (cl-some (lambda (item) (equal "Weld inspection procedure"
                                                (alist-get :title item)))
@@ -1168,10 +1167,9 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       ;; Force a brand new backend process with an empty in-memory cache,
       ;; so the next search can only succeed via the SQL reload path.
       (org-glean-embed-stop)
-      ;; See the z-threshold note in
+      ;; See the min_pool_for_z note in
       ;; org-glean-test-semantic-provider-returns-matching-targets above.
-      (let* ((org-glean-semantic-min-z nil)
-             (items (org-glean--semantic-search-provider "weld inspection" nil 5)))
+      (let* ((items (org-glean--semantic-search-provider "weld inspection" nil 5)))
         (should items)
         (should (cl-some (lambda (item) (equal "Weld inspection procedure"
                                                (alist-get :title item)))

@@ -73,6 +73,7 @@ from typing import Any
 PRESETS_PATH = Path(__file__).resolve().parent / "presets.json"
 DEFAULT_HUB_LAMBDA = 0.5
 DEFAULT_HUB_NEIGHBORS = 10
+DEFAULT_MIN_POOL_FOR_Z = 10
 
 
 def load_presets() -> dict[str, dict[str, Any]]:
@@ -293,7 +294,8 @@ class Backend:
         return self._matrix_cache
 
     def search(self, query: str, k: int, digests: list[str] | None,
-               min_z: float | None, hub_lambda: float) -> dict[str, Any]:
+               min_z: float | None, hub_lambda: float,
+               min_pool_for_z: int = DEFAULT_MIN_POOL_FOR_Z) -> dict[str, Any]:
         all_digests, centered, mean, hub = self._centered_matrix()
         if not all_digests:
             return {"results": []}
@@ -331,9 +333,22 @@ class Backend:
             for i in candidate_indices
         ]
         scored.sort(key=lambda item: item["score"], reverse=True)
-        if min_z is not None:
+        # A z-score threshold is not statistically meaningful below a
+        # minimum candidate count: numerically optimizing this exact
+        # formula (one point's deviation from the pool's median, scaled by
+        # the pool's population standard deviation) shows the single best
+        # candidate in a 7-item pool cannot exceed z~2.96 under ANY
+        # arrangement of the other six values, while an 8-item pool can
+        # just clear 3.0. DEFAULT_MIN_POOL_FOR_Z (10) sits comfortably
+        # above that breakeven point, so `min_z`'s default of 3.0 has real
+        # headroom to reject a merely-average candidate rather than being
+        # unreachable by construction. Below the floor, min_z is not
+        # applied at all - the caller gets its top-k by score instead of a
+        # confident empty result.
+        if min_z is not None and len(candidate_indices) >= min_pool_for_z:
             scored = [item for item in scored if item["z"] >= min_z]
         return {"results": scored[: max(0, k)]}
+
 
 
 def handle(backend: Backend, request: dict[str, Any]) -> dict[str, Any]:
@@ -349,7 +364,8 @@ def handle(backend: Backend, request: dict[str, Any]) -> dict[str, Any]:
     if op == "search":
         return backend.search(request["query"], int(request.get("k", 10)),
                                request.get("digests"), request.get("min_z"),
-                               float(request.get("hub_lambda", DEFAULT_HUB_LAMBDA)))
+                               float(request.get("hub_lambda", DEFAULT_HUB_LAMBDA)),
+                               int(request.get("min_pool_for_z", DEFAULT_MIN_POOL_FOR_Z)))
     raise ValueError(f"unknown op: {op!r}")
 
 

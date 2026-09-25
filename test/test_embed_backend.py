@@ -158,7 +158,10 @@ def test_min_z_filters_out_below_threshold_candidates(backend):
     # Five distinct-but-related passages plus one that shares no tokens
     # with the query at all: the outlier's z, relative to the other five,
     # should be clearly negative, and a high min_z should exclude it while
-    # an absent min_z keeps it.
+    # an absent min_z keeps it. min_pool_for_z is lowered to below this
+    # pool's size (6) so the filter itself is under test here, not the
+    # separate small-pool guard covered by
+    # test_min_z_is_not_applied_below_min_pool_for_z.
     passages = [
         "apple banana cherry",
         "apple banana date",
@@ -174,10 +177,32 @@ def test_min_z_filters_out_below_threshold_candidates(backend):
     unfiltered = backend.call("search", query="apple banana", k=10)["result"]["results"]
     assert len(unfiltered) == 6
 
-    filtered = backend.call("search", query="apple banana", k=10, min_z=0.5)["result"]["results"]
+    filtered = backend.call("search", query="apple banana", k=10, min_z=0.5,
+                            min_pool_for_z=2)["result"]["results"]
     digests = {r["digest"] for r in filtered}
     assert "d5" not in digests
     assert digests <= {"d0", "d1", "d2", "d3", "d4"}
+
+
+def test_min_z_is_not_applied_below_min_pool_for_z(backend):
+    # A z-score threshold is not statistically meaningful with only a
+    # handful of candidates: with the default min_pool_for_z (10), a
+    # 6-candidate pool must get its min_z ignored entirely rather than
+    # silently returning nothing just because the pool was too small for
+    # any z to reach the threshold.
+    passages = [
+        "apple banana cherry", "apple banana date", "apple banana fig",
+        "apple banana grape", "apple banana kiwi",
+        "zzz completely unrelated qqq",
+    ]
+    embedded = backend.call("embed", texts=passages, kind="passage")["result"]["vectors"]
+    items = [{"digest": f"d{i}", "vector": v} for i, v in enumerate(embedded)]
+    backend.call("load", items=items)
+
+    # An unreasonably high min_z would normally exclude everything; with
+    # too few candidates for the guard's floor, it must be ignored instead.
+    result = backend.call("search", query="apple banana", k=10, min_z=100.0)["result"]
+    assert len(result["results"]) == 6
 
 
 def test_hub_correction_subtracts_more_from_a_broadly_similar_passage(backend):
@@ -225,3 +250,17 @@ def test_search_min_z_with_no_candidates_in_digest_filter_is_empty(backend):
     backend.call("load", items=[{"digest": "only", "vector": embedded[0]}])
     result = backend.call("search", query="alpha", k=10, digests=["not-loaded"])["result"]
     assert result["results"] == []
+
+
+def test_min_z_is_applied_once_pool_meets_min_pool_for_z(backend):
+    # The mirror image of test_min_z_is_not_applied_below_min_pool_for_z:
+    # once the pool reaches the floor, an unreasonably high min_z must
+    # filter down to nothing, same as it would with no guard at all.
+    passages = [f"apple banana topic{i}" for i in range(9)] + ["zzz unrelated qqq"]
+    embedded = backend.call("embed", texts=passages, kind="passage")["result"]["vectors"]
+    items = [{"digest": f"d{i}", "vector": v} for i, v in enumerate(embedded)]
+    backend.call("load", items=items)
+
+    result = backend.call("search", query="apple banana", k=20, min_z=100.0)["result"]
+    assert result["results"] == []
+

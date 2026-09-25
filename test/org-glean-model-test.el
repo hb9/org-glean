@@ -25,16 +25,14 @@
           (org-glean-roots (list (list "fixture" root nil nil)))
           (org-glean-database-file (expand-file-name "index.sqlite" root))
           (org-glean--database nil)
-          (org-glean-semantic-model org-glean-model-test-preset)
-          ;; org-glean-semantic-min-z's production default (3.0) is
-          ;; calibrated against a real corpus of thousands of chunks; with
-          ;; the handful of fixture documents these tests use, the
-          ;; population z-score of even a clearly-best match routinely
-          ;; falls below it (a 2-candidate pool can never exceed z=1.0 at
-          ;; all). These tests are about whether the real model finds the
-          ;; right target, not about calibrating the threshold for tiny
-          ;; corpora, so it is disabled here.
-          (org-glean-semantic-min-z nil))
+          (org-glean-semantic-model org-glean-model-test-preset))
+     ;; These fixtures use only a handful of documents. org-glean-semantic-
+     ;; min-z's production default (3.0) is calibrated against a real
+     ;; corpus of thousands of chunks and would be unreachable at this
+     ;; pool size on its own terms, but the backend's min_pool_for_z guard
+     ;; (see semantic/org_glean_embed.py) means min_z is simply not applied
+     ;; below its floor -- so these tests exercise the real, unmodified
+     ;; default rather than needing to disable it.
      (unwind-protect (progn ,@body)
        (org-glean-close)
        (org-glean-embed-stop)
