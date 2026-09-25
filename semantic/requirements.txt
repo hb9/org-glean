@@ -1,0 +1,4 @@
+onnxruntime>=1.17
+tokenizers>=0.19
+numpy>=1.26
+huggingface_hub>=0.23

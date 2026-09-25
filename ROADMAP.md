@@ -50,9 +50,17 @@ Met.
       into the next window. A chunk's digest depends only on its text, not
       its position, so a heading that moves within its file keeps its
       vector.
-- Backend protocol (`hello`/`embed`/`load`/`search`, JSON Lines over stdio)
-  and our own `onnxruntime` + `tokenizers` wrapper — no third-party embedding
-  library, no PyTorch.
+- [x] Backend protocol and process (`semantic/org_glean_embed.py`):
+      `hello`/`embed`/`load`/`unload`/`search` over JSON Lines on stdio, our
+      own `onnxruntime` + `tokenizers` wrapper (no third-party embedding
+      library, no PyTorch), lazily imported so the fake-embedder test path
+      (`ORG_GLEAN_FAKE_EMBED=1`) has zero third-party dependencies. Model
+      presets (`semantic/presets.json`) are data: `e5-small` (default, 384
+      dimensions, mean pooling — verified against the cached model's own
+      `1_Pooling/config.json`), `e5-base`, `bge-m3`. Vectors travel as
+      base64-encoded float32, never JSON float arrays. The backend holds no
+      Org-shaped state (no generations, no manifests): it is a pure,
+      restartable scoring cache Emacs repopulates via `load`.
 - `org-glean-install`: package-private `uv` venv, one explicit consent
   prompt for model download, ONNX export + self-test (German/English
   paraphrase ranks above a distractor).
