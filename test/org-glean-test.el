@@ -80,6 +80,38 @@
       (should (= 1 rebuilds))
       (should (= 1 (length (org-glean-search "legacyneedle")))))))
 
+(ert-deftest org-glean-test-status-reports-index-and-reconcile-state ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "status.org" root) "* Status target\n")
+    (org-glean-reconcile)
+    (let ((status (org-glean-status)))
+      (should (= 1 (plist-get status :schema-version)))
+      (should (eq 'ready (plist-get status :state)))
+      (should (= 1 (plist-get status :indexed-sources)))
+      (should (= 2 (plist-get status :indexed-targets)))
+      (should (plist-get status :last-reconcile-at)))))
+
+(ert-deftest org-glean-test-status-reports-degraded-root-configuration ()
+  (org-glean-test--corpus
+    (let ((org-glean-roots '(("missing" "/no/such/root" nil nil))))
+      (let ((counts (org-glean-reconcile)))
+        (should (plist-get counts :scan-error)))
+      (should (eq 'degraded (plist-get (org-glean-status) :state)))
+      (should (= 1 (length org-glean--last-errors))))))
+
+(ert-deftest org-glean-test-reconcile-records-failed-source-for-diagnostics ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "diagnostic.org" root)))
+      (org-glean-test--write path "* Before\n")
+      (org-glean-reconcile)
+      (org-glean-test--write path "* After\n")
+      (cl-letf (((symbol-function 'org-glean--project)
+                 (lambda (&rest _) (error "fixture projection error"))))
+        (org-glean-reconcile))
+      (should (equal path (caar org-glean--last-errors)))
+      (should (string-match-p "fixture projection error"
+                              (cdar org-glean--last-errors))))))
+
 (ert-deftest org-glean-test-reconcile-and-search ()
   (org-glean-test--corpus
     (let* ((nested (expand-file-name "nested/a.org" root))

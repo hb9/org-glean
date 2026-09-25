@@ -64,6 +64,12 @@ An empty INCLUDES list accepts every .org file."
 (defvar org-glean--last-search-provider-errors nil)
 (defvar org-glean--provider-stale-seen nil)
 (defvar org-glean--provider-work-count 0)
+(defvar org-glean--last-reconcile-at nil
+  "Time of the most recently completed `org-glean-reconcile' call.")
+(defvar org-glean--last-reconcile-counts nil
+  "Count plist returned by the most recently completed reconciliation.")
+(defvar org-glean--last-errors nil
+  "Alist of (SOURCE-PATH . MESSAGE) for the latest reconciliation failures.")
 
 (defvar org-glean--database nil)
 (defvar org-glean--database-path nil)
@@ -371,6 +377,13 @@ reported and preserved; a failed tree walk never deletes indexed sources."
           (error (sqlite-rollback db) (signal (car err) (cdr err)))))))
     (when scan-error
       (setf (plist-get counts :scan-error) (error-message-string scan-error)))
+    (setq org-glean--last-reconcile-at (current-time)
+          org-glean--last-reconcile-counts (copy-sequence counts)
+          org-glean--last-errors
+          (append (when scan-error
+                    (list (cons "<root-scan>" (error-message-string scan-error))))
+                  (mapcar (lambda (failure) (cons (car failure) (cdr failure)))
+                          (plist-get counts :failed))))
     (when (called-interactively-p 'interactive) (message "org-glean: %S" counts))
     counts))
 
@@ -480,6 +493,57 @@ reported and preserved; a failed tree walk never deletes indexed sources."
       (org-glean-reconcile)
     (error (message "org-glean: periodic reconcile failed: %s"
                     (error-message-string err)))))
+
+(defun org-glean-status ()
+  "Return versioned read-only status for the active Org Glean index."
+  (interactive)
+  (let* ((database-available (file-readable-p org-glean-database-file))
+         (counts (when database-available
+                   (let ((db (org-glean--db)))
+                     (list :sources (or (caar (sqlite-select db "SELECT count(*) FROM sources")) 0)
+                           :targets (or (caar (sqlite-select db "SELECT count(*) FROM targets")) 0)))))
+         (state (cond ((null org-glean-roots) 'unavailable)
+                      ((or (plist-get org-glean--last-reconcile-counts :scan-error)
+                           org-glean--last-errors)
+                       'degraded)
+                      (database-available 'ready)
+                      (t 'unavailable)))
+         (status (list :schema-version 1 :state state
+                       :roots (mapcar (lambda (root) (list :id (car root) :path (expand-file-name (cadr root))))
+                                      org-glean-roots)
+                       :database (expand-file-name org-glean-database-file)
+                       :indexed-sources (plist-get counts :sources)
+                       :indexed-targets (plist-get counts :targets)
+                       :last-reconcile-at org-glean--last-reconcile-at
+                       :last-reconcile-counts org-glean--last-reconcile-counts
+                       :semantic-state 'unavailable
+                       :errors (copy-tree org-glean--last-errors))))
+    (when (called-interactively-p 'interactive)
+      (message "org-glean: %S" status))
+    status))
+
+(defun org-glean-show-errors ()
+  "Display the latest reconciliation and search-provider errors."
+  (interactive)
+  (let ((buffer (get-buffer-create "*Org Glean Errors*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Org Glean errors — %s\n\n"
+                        (or (and org-glean--last-reconcile-at
+                                 (format-time-string "%Y-%m-%d %H:%M:%S"
+                                                     org-glean--last-reconcile-at))
+                            "no reconciliation recorded")))
+        (if org-glean--last-errors
+            (dolist (failure org-glean--last-errors)
+              (insert (format "- %s: %s\n" (car failure) (cdr failure))))
+          (insert "No source/reconciliation errors recorded.\n"))
+        (when org-glean--last-search-provider-errors
+          (insert "\nLatest search provider errors:\n")
+          (dolist (failure org-glean--last-search-provider-errors)
+            (insert (format "- %s: %s\n" (car failure) (cdr failure)))))
+        (special-mode)))
+    (pop-to-buffer buffer)))
 
 (defun org-glean--results (rows)
   "Turn ROWS into typed result property lists."
