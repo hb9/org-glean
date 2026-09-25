@@ -212,7 +212,21 @@ extracted.
 (org-glean-close)                             ; -> nil; close disposable index
 (org-glean-status)                            ; -> versioned status plist
 (org-glean-show-errors)                       ; -> diagnostic buffer
+(org-glean-install &optional PRESET)          ; -> phase 1: managed backend install
+(org-glean-embed-available-p &optional PRESET) ; -> t if PRESET is installed
+(org-glean-embed-stop)                        ; -> nil; stop the backend process
 ```
+
+`org-glean-install` is interactive-first (prompts for PRESET via
+`completing-read` over the presets in `semantic/presets.json`), asks for one
+explicit consent naming the model and its approximate download size, then
+creates a package-private `uv` venv, installs backend dependencies,
+downloads the model's files, and runs a paraphrase self-test. It signals if
+`uv` is missing, if the download or self-test fails, or if PRESET is not a
+known name; it never silently downloads anything from ordinary search or
+status calls. `org-glean-embed-available-p` is the read-only counterpart:
+a pure filesystem check other code (the planned embedding queue, the
+semantic provider) uses to decide whether to attempt anything at all.
 
 MODES, when non-nil, is a list among `exact`, `lexical`, `fuzzy` and
 `semantic`; it defaults to `(exact lexical)`, with FUZZY as a legacy
@@ -234,15 +248,13 @@ govern search. MCP always requires a non-empty explicit allowed-root set.
 
 ### Planned entry points
 
-`org-glean-status` and `org-glean-show-errors` are implemented (see above).
-These names are reserved by the application contract but not yet
-implemented:
+`org-glean-status`, `org-glean-show-errors` and `org-glean-install` are
+implemented (see above and below). These names are reserved by the
+application contract but not yet implemented:
 
 ```elisp
 (org-glean-rebuild &optional ROOT-IDS)         ; -> reconciliation count plist
 (org-glean-resolve IDENTITY)                  ; -> current result or condition
-(org-glean-install &optional MODEL-PRESET)    ; -> phase 1: managed semantic
-                                               ;    backend setup with consent
 (org-glean-semantic-status)                   ; -> phase 1: per-model coverage
 ```
 

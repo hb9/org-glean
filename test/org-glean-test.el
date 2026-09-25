@@ -841,5 +841,84 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (should received)
       (should (alist-get 'error received)))))
 
+(ert-deftest org-glean-test-embed-presets-are-well-formed ()
+  (let ((presets (org-glean--embed-presets)))
+    (dolist (name '(e5-small e5-base bge-m3))
+      (let ((info (alist-get name presets)))
+        (should info)
+        (should (stringp (alist-get 'model_id info)))
+        (should (integerp (alist-get 'dimension info)))
+        (should (integerp (alist-get 'approx_size_mb info)))))))
+
+(ert-deftest org-glean-test-install-self-test-runs-protocol-without-erroring ()
+  (org-glean-test--fake-backend
+    ;; The fake embedder proves the self-test's plumbing (restart, embed,
+    ;; load with the expected digests, search) runs end to end without
+    ;; erroring; it deliberately does not assert the paraphrase ranks
+    ;; correctly, since the fake bag-of-hashes embedder shares no tokens
+    ;; between "Schweißnahtprüfung" and "weld inspection" and proves nothing
+    ;; about cross-language relevance (that is make test-model's job).
+    (should (memq (org-glean--install-self-test "e5-small") '(nil t)))))
+
+(ert-deftest org-glean-test-install-self-test-detects-correct-ranking ()
+  ;; Exercise the same load+search shape org-glean--install-self-test uses,
+  ;; but with texts the fake embedder's bag-of-hashes CAN rank correctly
+  ;; (they share tokens with the query), proving the ranking logic itself
+  ;; is sound independent of any real model's language quality.
+  (org-glean-test--fake-backend
+    (let* ((embedded (alist-get 'vectors
+                                (org-glean--embed-request-sync
+                                 "embed" '((texts . ["weld inspection procedure"
+                                                     "totally unrelated content"])
+                                           (kind . "passage"))
+                                 "e5-small")))
+           (positive (aref embedded 0))
+           (distractor (aref embedded 1)))
+      (org-glean--embed-request-sync
+       "load" `((items . (((digest . "pos") (vector . ,positive))
+                          ((digest . "neg") (vector . ,distractor)))))
+       "e5-small")
+      (let ((results (alist-get 'results
+                                (org-glean--embed-request-sync
+                                 "search" '((query . "weld inspection") (k . 1)) "e5-small"))))
+        (should (equal "pos" (alist-get 'digest (aref results 0))))))))
+
+(ert-deftest org-glean-test-install-declines-without-consent ()
+  (let ((venv (make-temp-file "org-glean-venv-noconsent-" t))
+        (ensure-called nil))
+    (unwind-protect
+        (let ((org-glean-semantic-venv-dir venv))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil))
+                    ((symbol-function 'org-glean--install-ensure-venv)
+                     (lambda (&rest _) (setq ensure-called t))))
+            (should-error (org-glean-install "e5-small")))
+          (should-not ensure-called))
+      (delete-directory venv t))))
+
+(ert-deftest org-glean-test-install-runs-steps-in-order-and-reports-self-test-failure ()
+  (let ((venv (make-temp-file "org-glean-venv-pipeline-" t))
+        (steps nil))
+    (unwind-protect
+        (let ((org-glean-semantic-venv-dir venv))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                    ((symbol-function 'org-glean--install-ensure-venv)
+                     (lambda (&rest _) (push 'venv steps)))
+                    ((symbol-function 'org-glean--install-download-model)
+                     (lambda (&rest _) (push 'download steps)))
+                    ((symbol-function 'org-glean--install-self-test)
+                     (lambda (&rest _) (push 'self-test steps) nil))
+                    ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+            (should-error (org-glean-install "e5-small") :type 'error)
+            (should (equal '(self-test download venv) steps))))
+      (delete-directory venv t))))
+
+(ert-deftest org-glean-test-install-unknown-preset-is-rejected ()
+  (let ((venv (make-temp-file "org-glean-venv-badpreset-" t)))
+    (unwind-protect
+        (let ((org-glean-semantic-venv-dir venv))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+            (should-error (org-glean-install "not-a-real-preset"))))
+      (delete-directory venv t))))
+
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

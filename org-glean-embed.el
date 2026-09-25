@@ -180,5 +180,126 @@ Returns the response's `result' alist, or signals an error using its
                (alist-get 'type failure) (alist-get 'message failure))))
     (alist-get 'result response)))
 
+;;; Installation
+
+(defun org-glean--embed-presets ()
+  "Return the parsed model preset table from semantic/presets.json.
+The single source of truth for preset names/metadata; both the Python
+backend and this Elisp orchestration read the same file, so they cannot
+drift out of sync."
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name "semantic/presets.json" org-glean--package-directory))
+    (json-parse-buffer :object-type 'alist :array-type 'list)))
+
+(defun org-glean--embed-preset-info (preset)
+  "Return PRESET's entry from `org-glean--embed-presets', or signal."
+  (or (alist-get (intern preset) (org-glean--embed-presets))
+      (error "Unknown semantic model preset: %s" preset)))
+
+(defun org-glean--install-log (buffer format-string &rest args)
+  "Append a formatted line to the install log BUFFER."
+  (with-current-buffer buffer
+    (goto-char (point-max))
+    (let ((inhibit-read-only t))
+      (insert (apply #'format format-string args)))))
+
+(defun org-glean--install-run (buffer program args)
+  "Run PROGRAM with ARGS synchronously, appending its output to BUFFER.
+Signals if PROGRAM exits non-zero; the failing command's own output in
+BUFFER is the diagnostic, so the error message just points at it."
+  (with-current-buffer buffer
+    (let ((inhibit-read-only t))
+      (insert (format "$ %s %s\n" program (mapconcat #'identity args " ")))))
+  (let* ((inhibit-read-only t)
+         (code (apply #'call-process program nil buffer nil args)))
+    (unless (eq code 0)
+      (error "%s failed (exit %s); see buffer %s" program code (buffer-name buffer)))))
+
+(defun org-glean--install-ensure-venv (buffer)
+  "Create the managed venv and install its dependencies if not already done."
+  (unless (executable-find "uv")
+    (error "uv is required to install the semantic backend; see https://docs.astral.sh/uv/"))
+  (unless (org-glean--embed-venv-python)
+    (org-glean--install-log buffer "Creating venv at %s...\n" org-glean-semantic-venv-dir)
+    (org-glean--install-run buffer "uv" (list "venv" org-glean-semantic-venv-dir)))
+  (org-glean--install-log buffer "Installing backend dependencies...\n")
+  (org-glean--install-run
+   buffer "uv"
+   (list "pip" "install" "--python" (org-glean--embed-venv-python)
+         "-r" (expand-file-name "semantic/requirements.txt" org-glean--package-directory))))
+
+(defun org-glean--install-download-model (buffer preset)
+  "Download PRESET's tokenizer/ONNX files into its managed model directory.
+The only network-touching step; only reached after `org-glean-install''s
+explicit consent prompt."
+  (let ((dir (org-glean--embed-model-dir preset)))
+    (make-directory dir t)
+    (org-glean--install-log buffer "Downloading %s model files into %s...\n" preset dir)
+    (org-glean--install-run
+     buffer (org-glean--embed-venv-python)
+     (list (expand-file-name "semantic/org_glean_download.py" org-glean--package-directory)
+           preset dir))))
+
+(defun org-glean--install-self-test (preset)
+  "Verify PRESET actually embeds meaningfully: a German/English paraphrase
+of the same fact must outrank an unrelated distractor. Returns non-nil on
+success. Restarts the backend process first, so a stale (e.g. fake-mode)
+process from a prior session cannot mask a broken installation."
+  (org-glean-embed-stop)
+  (let* ((embedded (alist-get 'vectors
+                              (org-glean--embed-request-sync
+                               "embed" '((texts . ["Schweißnahtprüfung" "quarterly sales report"])
+                                         (kind . "passage"))
+                               preset 120)))
+         (positive (aref embedded 0))
+         (distractor (aref embedded 1)))
+    (org-glean--embed-request-sync
+     "load" `((items . (((digest . "org-glean-selftest-positive") (vector . ,positive))
+                        ((digest . "org-glean-selftest-distractor") (vector . ,distractor)))))
+     preset 60)
+    (let ((results (alist-get 'results
+                              (org-glean--embed-request-sync
+                               "search" '((query . "weld inspection") (k . 1)) preset 60))))
+      (and results
+           (equal "org-glean-selftest-positive" (alist-get 'digest (aref results 0)))))))
+
+(defun org-glean-install (&optional preset)
+  "Install and verify a local semantic search backend for PRESET.
+Interactively prompts for the preset (default `org-glean-semantic-model')
+and, after showing its approximate download size, asks for one explicit
+consent before any network access. Creates a package-private `uv' venv
+under `org-glean-semantic-venv-dir', installs backend dependencies,
+downloads the model's tokenizer/ONNX files, and runs a self-test that a
+German/English paraphrase ranks above an unrelated distractor. Ordinary
+search never reaches any of this implicitly."
+  (interactive
+   (list (completing-read "Install semantic model preset: "
+                          (mapcar (lambda (pair) (symbol-name (car pair)))
+                                  (org-glean--embed-presets))
+                          nil t org-glean-semantic-model)))
+  (let* ((preset (or preset org-glean-semantic-model))
+         (info (org-glean--embed-preset-info preset))
+         (size-mb (alist-get 'approx_size_mb info))
+         (buffer (get-buffer-create "*Org Glean Install*")))
+    (unless (yes-or-no-p
+             (format "Download %s (~%s MB) from Hugging Face into %s? "
+                     (alist-get 'model_id info) size-mb org-glean-semantic-venv-dir))
+      (user-error "org-glean-install: cancelled, nothing downloaded"))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (special-mode))
+    (org-glean--install-ensure-venv buffer)
+    (org-glean--install-download-model buffer preset)
+    (org-glean--install-log buffer "Running self-test...\n")
+    (if (org-glean--install-self-test preset)
+        (progn
+          (org-glean--install-log buffer "Self-test passed: paraphrase ranked correctly.\n")
+          (message "org-glean-install: %s installed and verified" preset))
+      (org-glean--install-log buffer "Self-test FAILED: paraphrase did not outrank the distractor.\n")
+      (pop-to-buffer buffer)
+      (error "org-glean-install: self-test failed for %s; see buffer %s" preset (buffer-name buffer)))
+    (pop-to-buffer buffer)))
+
 (provide 'org-glean-embed)
 ;;; org-glean-embed.el ends here

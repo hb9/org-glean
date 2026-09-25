@@ -6,7 +6,8 @@
     "max_tokens": 512,
     "query_prefix": "query: ",
     "passage_prefix": "passage: ",
-    "pooling": "mean"
+    "pooling": "mean",
+    "approx_size_mb": 470
   },
   "e5-base": {
     "model_id": "intfloat/multilingual-e5-base",
@@ -15,7 +16,8 @@
     "max_tokens": 512,
     "query_prefix": "query: ",
     "passage_prefix": "passage: ",
-    "pooling": "mean"
+    "pooling": "mean",
+    "approx_size_mb": 1100
   },
   "bge-m3": {
     "model_id": "BAAI/bge-m3",
@@ -24,6 +26,7 @@
     "max_tokens": 8192,
     "query_prefix": "",
     "passage_prefix": "",
-    "pooling": "cls"
+    "pooling": "cls",
+    "approx_size_mb": 2200
   }
 }

@@ -61,9 +61,23 @@ Met.
       base64-encoded float32, never JSON float arrays. The backend holds no
       Org-shaped state (no generations, no manifests): it is a pure,
       restartable scoring cache Emacs repopulates via `load`.
-- `org-glean-install`: package-private `uv` venv, one explicit consent
-  prompt for model download, ONNX export + self-test (German/English
-  paraphrase ranks above a distractor).
+- [x] Async client (`org-glean-embed.el`): a persistent, restartable
+      subprocess wrapper around the C3 backend with both an asynchronous
+      (callback-keyed) and synchronous (timeout) calling convention.
+      `org-glean-embed-available-p` is a pure filesystem check with no
+      process start and no network access.
+- [x] `org-glean-install`: prompts for a preset (default
+      `org-glean-semantic-model`) and shows its approximate download size
+      before one explicit consent prompt; creates a package-private `uv`
+      venv under `org-glean-semantic-venv-dir`, installs backend
+      dependencies, downloads the model's tokenizer/ONNX files
+      (`semantic/org_glean_download.py`, the only network-touching step),
+      and runs a self-test that a German/English paraphrase outranks an
+      unrelated distractor via the real protocol (embed, load, search) —
+      not a hand-rolled similarity computation in Elisp. Model download and
+      dependency install currently run synchronously (`call-process`) with
+      output in a `*Org Glean Install*` log buffer; converting this to a
+      fully async step chain is deferred (see open questions).
 - Model presets: `e5-small` (default), `e5-base`, `bge-m3` — swappable via
   `org-glean-semantic-model` with no other invalidation.
 - Background embedding queue: saves and reconciliation update chunks and
@@ -136,3 +150,8 @@ which stays fully usable throughout on lexical/exact evidence.
   against the model's real token limit; if that shows frequent truncation on
   real content, tune the character estimate down or move windowing behind
   the backend boundary where a real tokenizer is available.
+- **Synchronous `org-glean-install`.** venv creation, dependency install and
+  model download currently block Emacs via `call-process`, appropriate for
+  a rare, explicit, user-initiated action but not ideal for a large model on
+  a slow connection. Convert to an async step chain if this proves
+  disruptive in practice.
