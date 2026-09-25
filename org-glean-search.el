@@ -43,6 +43,37 @@ K flattens the difference between a mode's rank-1 and rank-20 candidates;
   :type 'integer
   :group 'org-glean)
 
+(defcustom org-glean-semantic-min-z 3.0
+  "Minimum z-score (see `org-glean--embed-request-sync' `search' op) a
+semantic hit must clear to be considered at all. Chosen against the
+user's real corpus: every known-good query in that measurement reached
+at least this z after mean-centering and hub correction, while it still
+excludes most of the long, nearly-indistinguishable tail that plain
+cosine similarity cannot separate. A query with no strong match anywhere
+in the corpus can legitimately return nothing at this threshold -- that
+is a correct result, not a bug; see `org-glean-eval' for how to check
+this default against your own corpus."
+  :type 'number
+  :group 'org-glean)
+
+(defcustom org-glean-semantic-hub-lambda 0.5
+  "Hub-correction strength passed to the embedding backend's `search' op.
+Subtracted, scaled by this factor, from each candidate's centered cosine
+before ranking; see semantic/org_glean_embed.py for the derivation.
+Validated together with `org-glean-semantic-min-z' against a real corpus:
+0 (no correction) let generically-similar hub chunks outrank the actual
+match for several known-good queries."
+  :type 'number
+  :group 'org-glean)
+
+(defcustom org-glean-semantic-max-hits 10
+  "Hard cap on semantic candidates contributed to fusion for one query,
+applied after `org-glean-semantic-min-z' filtering. Keeps a query that
+clears the z-threshold broadly (rather than sharply, for one obvious
+target) from flooding fusion with a long tail of merely-plausible hits."
+  :type 'integer
+  :group 'org-glean)
+
 (defcustom org-glean-default-modes nil
   "Provider modes requested by the interactive commands and MCP when the
 caller does not specify any. Nil (the default) means automatic:
@@ -227,20 +258,23 @@ real similarity number to :score; that is used as-is."
       (if (eq mode 'exact) 100.0 (max 85.0 (- 94.0 (* rank 0.01))))))
 
 (defun org-glean--semantic-chunk-hit-targets (db hits)
-  "Return (TARGET-KEY . SCORE) pairs from HITS, highest score first, deduped
-by owning target. HITS is a vector of alists with `digest' and `score',
-already sorted by the backend descending by score; the first hit seen for
-a given target is therefore its best-scoring chunk, so later duplicate
-occurrences of the same target are simply skipped rather than compared."
+  "Return (TARGET-KEY SCORE . Z) entries from HITS, highest score first,
+deduped by owning target. HITS is a vector of alists with `digest',
+`score' and `z', already sorted by the backend descending by score; the
+first hit seen for a given target is therefore its best-scoring chunk, so
+later duplicate occurrences of the same target are simply skipped rather
+than compared. Z is carried through unchanged from that same best chunk,
+since it and SCORE describe the same backend decision."
   (let ((best (make-hash-table :test #'equal)) (order nil))
     (cl-loop for hit across hits
              for digest = (alist-get 'digest hit)
              for score = (alist-get 'score hit)
+             for z = (alist-get 'z hit)
              for target-key = (caar (sqlite-select
                                      db "SELECT target_key FROM chunks WHERE text_digest = ? LIMIT 1"
                                      (vector digest)))
              when (and target-key (not (gethash target-key best)))
-             do (progn (puthash target-key score best)
+             do (progn (puthash target-key (cons score z) best)
                        (push target-key order)))
     (mapcar (lambda (key) (cons key (gethash key best))) (nreverse order))))
 
@@ -249,8 +283,9 @@ occurrences of the same target are simply skipped rather than compared."
 Embeds QUERY, scores it against the backend's in-memory vectors (warming
 it from SQLite first if this is a fresh process), aggregates chunk hits up
 to their owning target by max score, applies FILTERS the same way every
-other provider does, and returns at most LIMIT target items with :score
-and :source-current set. Signals if the active model's backend is not
+other provider does, and returns at most `(min LIMIT
+org-glean-semantic-max-hits)' target items with :score, :semantic-z and
+:source-current set. Signals if the active model's backend is not
 installed; the caller (`org-glean-search-filtered') turns that into a
 `provider-errors' entry rather than a crash, exactly like any other
 provider's failure."
@@ -260,42 +295,60 @@ provider's failure."
       (error "Semantic model %s is not installed; run M-x org-glean-install" model))
     (org-glean--semantic-ensure-warm db model)
     (let* ((response (org-glean--embed-request-sync
-                      "search" `((query . ,query) (k . ,(min 200 (max 50 (* limit 5)))))
-                      model))
+                       "search" `((query . ,query)
+                                  (k . ,(min 200 (max 50 (* limit 5))))
+                                  (min_z . ,org-glean-semantic-min-z)
+                                  (hub_lambda . ,org-glean-semantic-hub-lambda))
+                       model))
            (hits (or (alist-get 'results response) []))
            (ranked (org-glean--semantic-chunk-hit-targets db hits))
+           (cap (min limit org-glean-semantic-max-hits))
            (items nil))
-      (cl-loop for (target-key . score) in ranked
-               while (< (length items) limit)
+      (cl-loop for (target-key score . z) in ranked
+               while (< (length items) cap)
                do (let ((rows (sqlite-select
-                              db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE key = ?"
-                              (vector target-key))))
+                               db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE key = ?"
+                               (vector target-key))))
                     (when (= (length rows) 1)
                       (let ((item (car (org-glean--results rows))))
                         (when (org-glean--eligible-p item filters)
                           (setf (alist-get :score item) score
+                                (alist-get :semantic-z item) z
                                 (alist-get :source-current item)
                                 (and (file-exists-p (alist-get :path item))
                                      (equal (alist-get :digest item)
-                                           (org-glean--digest (alist-get :path item)))))
+                                            (org-glean--digest (alist-get :path item)))))
                           (push item items))))))
       (nreverse items))))
+
 
 (defun org-glean--fusion-weight (mode)
   "Return MODE's configured fusion weight, or 0 if unconfigured."
   (or (cdr (assq mode org-glean-fusion-weights)) 0.0))
 
-(defun org-glean--fusion-contribution (mode rank)
-  "Return one mode's reciprocal-rank fusion contribution at 0-based RANK."
-  (/ (org-glean--fusion-weight mode) (float (+ org-glean-fusion-k rank 1))))
+(defun org-glean--fusion-contribution (mode rank &optional z)
+  "Return one mode's reciprocal-rank fusion contribution at 0-based RANK.
+For `semantic' hits, Z (the backend's z-score for that hit) scales the
+mode's configured weight by `(clamp (/ Z 5.0) 0.0 1.0)': a hit that only
+barely cleared `org-glean-semantic-min-z' contributes noticeably less than
+one whose z-score reflects a confident, well-separated match. A nil Z
+(every other mode, or a semantic candidate somehow missing one, e.g. a
+legacy caller) leaves the mode's weight unscaled, matching prior
+behavior."
+  (let ((weight (org-glean--fusion-weight mode)))
+    (when (and (eq mode 'semantic) z)
+      (setq weight (* weight (max 0.0 (min 1.0 (/ z 5.0))))))
+    (/ weight (float (+ org-glean-fusion-k rank 1)))))
 
 (defun org-glean--fusion-merge (provider-lists)
   "Merge PROVIDER-LISTS, an alist of (MODE . RANKED-ITEMS), by target key.
-Each returned item gains a :modes list of (MODE RANK RAW-SCORE) entries,
+Each returned item gains a :modes list of (MODE RANK RAW-SCORE Z) entries,
 one per contributing provider, and has its :source-current set exactly
-once. Item identity/base fields come from whichever provider found the
-target first; the fields are the same regardless of which provider's SQL
-query produced them, since they all describe the same indexed target."
+once. Z is the semantic backend's z-score (see `org-glean--fusion-
+contribution') for a `semantic' entry, or nil for every other mode. Item
+identity/base fields come from whichever provider found the target first;
+the fields are the same regardless of which provider's SQL query produced
+them, since they all describe the same indexed target."
   (let ((table (make-hash-table :test #'equal)) (order nil))
     (dolist (pair provider-lists)
       (let ((mode (car pair)))
@@ -303,11 +356,12 @@ query produced them, since they all describe the same indexed target."
                  for rank from 0
                  do (let* ((key (alist-get :key item))
                            (raw (org-glean--raw-score item mode rank))
+                           (z (and (eq mode 'semantic) (alist-get :semantic-z item)))
                            (existing (gethash key table)))
                       (if existing
                           (setf (alist-get :modes existing)
-                                (cons (list mode rank raw) (alist-get :modes existing)))
-                        (setf (alist-get :modes item) (list (list mode rank raw)))
+                                (cons (list mode rank raw z) (alist-get :modes existing)))
+                        (setf (alist-get :modes item) (list (list mode rank raw z)))
                         ;; org-glean--set-freshness adds a *new* alist key, which
                         ;; only takes effect on the list head it is given back as
                         ;; its return value -- it must be reassigned here, not
@@ -320,16 +374,18 @@ query produced them, since they all describe the same indexed target."
 (defun org-glean--fusion-finalize (item)
   "Compute and set ITEM's fused :score, :pinned and :match-type from :modes."
   (let* ((modes (alist-get :modes item))
-         (fused (cl-loop for (mode rank _raw) in modes
-                        sum (org-glean--fusion-contribution mode rank)))
+         (fused (cl-loop for (mode rank _raw z) in modes
+                        sum (org-glean--fusion-contribution mode rank z)))
          (primary (car (cl-reduce
                         (lambda (a b) (if (>= (cdr a) (cdr b)) a b))
-                        (mapcar (lambda (m) (cons (car m) (org-glean--fusion-contribution (car m) (nth 1 m))))
+                        (mapcar (lambda (m) (cons (car m) (org-glean--fusion-contribution
+                                                           (car m) (nth 1 m) (nth 3 m))))
                                 modes)))))
     (setf (alist-get :score item) fused
           (alist-get :pinned item) (and (assq 'exact modes) t)
           (alist-get :match-type item) primary)
     item))
+
 
 (defun org-glean--relevance-before-p (left right)
   "Return non-nil if LEFT has higher display relevance than RIGHT.
@@ -470,11 +526,13 @@ served (for example `semantic' with no provider configured) is absent from
                                               (:margin . ,(- score next-score))
                                              (:match-reason . ,(mapconcat
                                                                 (lambda (m)
-                                                                  (format "%s #%d" (car m) (1+ (nth 1 m))))
+                                                                  (if (nth 3 m)
+                                                                      (format "%s #%d z%.1f" (car m) (1+ (nth 1 m)) (nth 3 m))
+                                                                    (format "%s #%d" (car m) (1+ (nth 1 m)))))
                                                                 (sort (copy-sequence (alist-get :modes item))
                                                                       (lambda (a b)
-                                                                        (> (org-glean--fusion-contribution (car a) (nth 1 a))
-                                                                           (org-glean--fusion-contribution (car b) (nth 1 b)))))
+                                                                        (> (org-glean--fusion-contribution (car a) (nth 1 a) (nth 3 a))
+                                                                           (org-glean--fusion-contribution (car b) (nth 1 b) (nth 3 b)))))
                                                                 " + "))
                                              (:link . ,(if (alist-get :org-id item)
                                                            (format "[[id:%s][%s]]"

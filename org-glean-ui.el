@@ -137,16 +137,22 @@ value in `org-glean--results-previous-modes'.")
   "Return ITEM's contributing modes as a short \"a+b\" string.
 Modes are ordered by their fusion contribution, strongest first, so this
 reads the same way `:match-type' (the single strongest contributor) was
-chosen. Falls back to the bare match-type for an ITEM built without a
-`:modes' list (e.g. constructed directly rather than via
+chosen. A `semantic' contribution with a z-score is shown as e.g. \"sem6\"
+(the z rounded to the nearest integer), so a glance at this column tells
+apart a confident semantic hit from one that only barely cleared
+`org-glean-semantic-min-z'. Falls back to the bare match-type for an ITEM
+built without a `:modes' list (e.g. constructed directly rather than via
 `org-glean-search-filtered')."
   (let ((modes (alist-get :modes item)))
     (if (null modes)
         (or (and (alist-get :match-type item) (symbol-name (alist-get :match-type item))) "")
-      (mapconcat (lambda (m) (org-glean--mode-abbrev (car m)))
+      (mapconcat (lambda (m)
+                   (if (and (eq (car m) 'semantic) (nth 3 m))
+                       (format "%s%d" (org-glean--mode-abbrev (car m)) (round (nth 3 m)))
+                     (org-glean--mode-abbrev (car m))))
                 (sort (copy-sequence modes)
-                      (lambda (a b) (> (org-glean--fusion-contribution (car a) (nth 1 a))
-                                      (org-glean--fusion-contribution (car b) (nth 1 b)))))
+                      (lambda (a b) (> (org-glean--fusion-contribution (car a) (nth 1 a) (nth 3 a))
+                                      (org-glean--fusion-contribution (car b) (nth 1 b) (nth 3 b)))))
                 "+"))))
 
 (defun org-glean--result-groups (items)

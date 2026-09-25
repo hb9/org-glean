@@ -1118,6 +1118,12 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (should (eq 'ready (plist-get (org-glean-status) :semantic-state))))))
 
 (ert-deftest org-glean-test-semantic-provider-returns-matching-targets ()
+  ;; org-glean-semantic-min-z's production default (3.0) is unreachable by
+  ;; construction with only two candidates -- the population z-score of the
+  ;; higher of exactly two points is always exactly 1.0 -- so it is bound to
+  ;; nil here to exercise the provider's own mechanics rather than the
+  ;; z-threshold, which is covered on its own terms in
+  ;; `test/test_embed_backend.py'.
   (org-glean-test--corpus
     (org-glean-test--fake-backend
       (org-glean-test--write (expand-file-name "weld.org" root)
@@ -1128,7 +1134,8 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (let (done)
         (org-glean--semantic-queue-process-batch (lambda (n) (setq done n)))
         (should (org-glean-test--wait-for (lambda () done))))
-      (let ((items (org-glean--semantic-search-provider "weld inspection" nil 5)))
+      (let* ((org-glean-semantic-min-z nil)
+             (items (org-glean--semantic-search-provider "weld inspection" nil 5)))
         (should items)
         (should (cl-some (lambda (item) (equal "Weld inspection procedure"
                                                (alist-get :title item)))
@@ -1161,7 +1168,10 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       ;; Force a brand new backend process with an empty in-memory cache,
       ;; so the next search can only succeed via the SQL reload path.
       (org-glean-embed-stop)
-      (let ((items (org-glean--semantic-search-provider "weld inspection" nil 5)))
+      ;; See the z-threshold note in
+      ;; org-glean-test-semantic-provider-returns-matching-targets above.
+      (let* ((org-glean-semantic-min-z nil)
+             (items (org-glean--semantic-search-provider "weld inspection" nil 5)))
         (should items)
         (should (cl-some (lambda (item) (equal "Weld inspection procedure"
                                                (alist-get :title item)))
@@ -1239,6 +1249,53 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
            (weak-item (cl-find "weak" merged :key (lambda (i) (alist-get :key i)) :test #'equal))
            (strong-item (cl-find "strong" merged :key (lambda (i) (alist-get :key i)) :test #'equal)))
       (should (> (alist-get :score strong-item) (alist-get :score weak-item))))))
+
+(ert-deftest org-glean-test-fusion-contribution-scales-semantic-weight-by-z ()
+  ;; A confident semantic hit (high z) must contribute more to fusion than
+  ;; an equally-ranked one that only barely cleared the z-threshold; the
+  ;; scale factor is min(1, z/5), so z=5 leaves the weight unscaled and z=1
+  ;; cuts it to a fifth.
+  (should (= (org-glean--fusion-contribution 'semantic 0 5.0)
+             (org-glean--fusion-contribution 'semantic 0)))
+  (should (< (org-glean--fusion-contribution 'semantic 0 1.0)
+             (org-glean--fusion-contribution 'semantic 0 5.0)))
+  ;; A z above 5 does not grant more than the mode's full configured weight.
+  (should (= (org-glean--fusion-contribution 'semantic 0 9.0)
+             (org-glean--fusion-contribution 'semantic 0 5.0)))
+  ;; Non-semantic modes ignore Z entirely, and a nil Z on a semantic entry
+  ;; behaves exactly like the pre-z-scoring formula.
+  (should (= (org-glean--fusion-contribution 'lexical 0 0.1)
+             (org-glean--fusion-contribution 'lexical 0)))
+  (should (= (org-glean--fusion-contribution 'semantic 0 nil)
+             (org-glean--fusion-contribution 'semantic 0))))
+
+(ert-deftest org-glean-test-fusion-merge-carries-semantic-z-into-modes ()
+  (cl-letf (((symbol-function 'file-exists-p) (lambda (_) nil)))
+    (let* ((item (org-glean-test--fusion-item "s" (cons :semantic-z 6.2)))
+           (merged (org-glean--fusion-merge (list (cons 'semantic (list item)))))
+           (found (car merged)))
+      (should (= 6.2 (nth 3 (car (alist-get :modes found)))))
+      ;; A lexical entry must never pick up a z value, even from an item
+      ;; that happens to carry a stray :semantic-z field.
+      (let* ((stray (org-glean-test--fusion-item "l" (cons :semantic-z 9.9)))
+             (lex-merged (org-glean--fusion-merge (list (cons 'lexical (list stray))))))
+        (should (null (nth 3 (car (alist-get :modes (car lex-merged))))))))))
+
+(ert-deftest org-glean-test-fusion-score-weak-z-semantic-does-not-beat-full-weight-lexical ()
+  ;; A semantic hit that only barely cleared the z-threshold (z near 0)
+  ;; must contribute close to nothing, so a plain top-ranked lexical hit
+  ;; still outranks it -- confirming the z-scaling actually suppresses
+  ;; weak semantic candidates rather than merely being cosmetic.
+  (cl-letf (((symbol-function 'file-exists-p) (lambda (_) nil)))
+    (let* ((strong-lexical (org-glean-test--fusion-item "lex"))
+           (barely-semantic (org-glean-test--fusion-item "sem" (cons :semantic-z 0.01)))
+           (merged (mapcar #'org-glean--fusion-finalize
+                          (org-glean--fusion-merge
+                           (list (cons 'lexical (list strong-lexical))
+                                 (cons 'semantic (list barely-semantic))))))
+           (lex-item (cl-find "lex" merged :key (lambda (i) (alist-get :key i)) :test #'equal))
+           (sem-item (cl-find "sem" merged :key (lambda (i) (alist-get :key i)) :test #'equal)))
+      (should (> (alist-get :score lex-item) (alist-get :score sem-item))))))
 
 (ert-deftest org-glean-test-search-filtered-pool-lets-semantic-compete-with-lexical-crowd ()
   ;; Integration-level version of the fusion-score test: even with dozens of
