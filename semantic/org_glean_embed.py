@@ -16,8 +16,10 @@ Protocol (one JSON object per line in, one per line out, correlated by "id"):
     {"id": 4, "op": "unload", "digests": ["..."]}
     -> {"id": 4, "result": {"unloaded": N}}
 
-    {"id": 5, "op": "search", "query": "...", "k": 10, "digests": [...]?}
-    -> {"id": 5, "result": {"results": [{"digest": "...", "score": 0.83}, ...]}}
+    {"id": 5, "op": "search", "query": "...", "k": 10, "digests": [...]?,
+     "min_z": 3.0?, "hub_lambda": 0.5?}
+    -> {"id": 5, "result": {"results": [{"digest": "...", "score": 0.02,
+                                          "cosine": 0.84, "z": 5.8}, ...]}}
 
 Any failure is returned as {"id": ..., "error": {"type": "...", "message": "..."}}
 rather than crashing the process, so one bad request does not take down a
@@ -32,6 +34,28 @@ Emacs holds no model-shaped state at all, and this backend holds no
 Org-shaped state at all (no generations, no manifests, no staleness
 policy) - it is a pure, restartable scoring cache over content-addressed
 vectors that Emacs already knows how to rebuild via `load`.
+
+Scoring is not a bare dot product. Measured against a real, mixed-content
+corpus (work notes, hours, a recipe): multilingual-e5-small crowds nearly
+every chunk into cosine 0.77-0.85 against almost any query, so the best
+match and the 500th are barely distinguishable, and a handful of "hub"
+chunks (a login-flow dump, a training-portal link) score in the top 5 for
+completely unrelated queries. Two corrections, applied together (neither
+alone was sufficient in that measurement):
+
+  1. Mean-centering: subtract the corpus's mean vector from every vector
+     (query included) before comparing. Standard correction for this kind
+     of embedding anisotropy; costs one extra vector, recomputed whenever
+     the loaded vector set changes.
+  2. A CSLS-style hub penalty: subtract each candidate's own average
+     similarity to its 10 nearest neighbours. This is what actually
+     demotes the hub chunks - centering alone left them in the top 5.
+
+Scores are then reported as a z-value relative to the median/spread of
+the current candidate pool (after any `digests` prefilter), so a caller
+can apply a threshold that means "notably better than typical for this
+query" rather than an absolute cosine cutoff, which measurement showed
+does not transfer across queries.
 """
 
 from __future__ import annotations
@@ -40,12 +64,15 @@ import base64
 import json
 import math
 import os
+import statistics
 import struct
 import sys
 from pathlib import Path
 from typing import Any
 
 PRESETS_PATH = Path(__file__).resolve().parent / "presets.json"
+DEFAULT_HUB_LAMBDA = 0.5
+DEFAULT_HUB_NEIGHBORS = 10
 
 
 def load_presets() -> dict[str, dict[str, Any]]:
@@ -66,10 +93,6 @@ def normalize(values: list[float]) -> list[float]:
     if norm == 0:
         return values
     return [v / norm for v in values]
-
-
-def dot(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
 
 
 class FakeEmbedder:
@@ -169,6 +192,12 @@ class Backend:
             if model_dir is None:
                 raise ValueError("model_dir is required outside fake mode")
             self.embedder = OnnxEmbedder(model_dir, self.preset)
+        # numpy is only ever available here via OnnxEmbedder (which already
+        # requires it); reusing that reference means the fake-embedder path
+        # never imports numpy, keeping the fast test suite dependency-free,
+        # while a real, thousands-of-chunks corpus gets vectorized scoring.
+        self._np = getattr(self.embedder, "_np", None)
+        self._matrix_cache: tuple[list[str], Any, list[float], list[float]] | None = None
 
     def hello(self) -> dict[str, Any]:
         return {
@@ -196,6 +225,7 @@ class Backend:
             vector = decode_vector(item["vector"], self.dimension)
             self.vectors[digest] = vector
             loaded += 1
+        self._matrix_cache = None
         return {"loaded": loaded}
 
     def unload(self, digests: list[str]) -> dict[str, Any]:
@@ -203,20 +233,107 @@ class Backend:
         for digest in digests:
             if self.vectors.pop(digest, None) is not None:
                 unloaded += 1
+        self._matrix_cache = None
         return {"unloaded": unloaded}
 
-    def search(self, query: str, k: int, digests: list[str] | None) -> dict[str, Any]:
+    def _centered_matrix(self):
+        """Return (digests, centered-unit vectors, mean, per-vector hub score).
+
+        Cached until the next `load`/`unload`. Centered vectors and hub
+        scores are recomputed together because both derive from the same
+        pass over the loaded vector set, and both are invalidated by
+        exactly the same events.
+        """
+        if self._matrix_cache is not None:
+            return self._matrix_cache
+        digests = list(self.vectors.keys())
+        if not digests:
+            self._matrix_cache = (digests, None, None, [])
+            return self._matrix_cache
+        if self._np is not None:
+            np = self._np
+            matrix = np.array([self.vectors[d] for d in digests], dtype=np.float32)
+            mean = matrix.mean(axis=0)
+            centered = matrix - mean
+            norms = np.clip(np.linalg.norm(centered, axis=1, keepdims=True), 1e-12, None)
+            centered = centered / norms
+            n = len(digests)
+            if n > 1:
+                similarity = centered @ centered.T
+                np.fill_diagonal(similarity, -1.0)
+                neighbors = min(DEFAULT_HUB_NEIGHBORS, n - 1)
+                nearest = np.partition(similarity, n - neighbors, axis=1)[:, n - neighbors:]
+                hub = nearest.mean(axis=1).tolist()
+            else:
+                hub = [0.0]
+            mean = mean.tolist()
+        else:
+            # Pure-Python fallback: only reachable via the fake embedder,
+            # whose tests use a handful of vectors, so an O(n^2) pass here
+            # is fine; a real corpus always goes through the numpy path
+            # above via OnnxEmbedder.
+            dim = len(self.vectors[digests[0]])
+            n = len(digests)
+            mean = [sum(self.vectors[d][i] for d in digests) / n for i in range(dim)]
+            centered = []
+            for d in digests:
+                shifted = [self.vectors[d][i] - mean[i] for i in range(dim)]
+                norm = math.sqrt(sum(x * x for x in shifted)) or 1.0
+                centered.append([x / norm for x in shifted])
+            hub = []
+            for i in range(n):
+                sims = sorted(
+                    (sum(a * b for a, b in zip(centered[i], centered[j]))
+                     for j in range(n) if j != i),
+                    reverse=True,
+                )
+                top = sims[: min(DEFAULT_HUB_NEIGHBORS, len(sims))]
+                hub.append(sum(top) / len(top) if top else 0.0)
+        self._matrix_cache = (digests, centered, mean, hub)
+        return self._matrix_cache
+
+    def search(self, query: str, k: int, digests: list[str] | None,
+               min_z: float | None, hub_lambda: float) -> dict[str, Any]:
+        all_digests, centered, mean, hub = self._centered_matrix()
+        if not all_digests:
+            return {"results": []}
         embedded = self.embed([query], "query")
         query_vector = decode_vector(embedded["vectors"][0], self.dimension)
-        candidates = (
-            [(d, self.vectors[d]) for d in digests if d in self.vectors]
-            if digests is not None
-            else list(self.vectors.items())
-        )
-        scored = [(digest, dot(query_vector, vector)) for digest, vector in candidates]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        top = scored[: max(0, k)]
-        return {"results": [{"digest": d, "score": s} for d, s in top]}
+        if self._np is not None:
+            np = self._np
+            shifted = np.asarray(query_vector, dtype=np.float32) - np.asarray(mean, dtype=np.float32)
+            norm = max(float(np.linalg.norm(shifted)), 1e-12)
+            query_centered = shifted / norm
+            cosine = (centered @ query_centered).tolist()
+        else:
+            shifted = [query_vector[i] - mean[i] for i in range(len(query_vector))]
+            norm = math.sqrt(sum(x * x for x in shifted)) or 1.0
+            query_centered = [x / norm for x in shifted]
+            cosine = [sum(a * b for a, b in zip(row, query_centered)) for row in centered]
+        raw = [cosine[i] - hub_lambda * hub[i] for i in range(len(all_digests))]
+        if digests is not None:
+            allowed = set(digests)
+            candidate_indices = [i for i, d in enumerate(all_digests) if d in allowed]
+        else:
+            candidate_indices = list(range(len(all_digests)))
+        if not candidate_indices:
+            return {"results": []}
+        pool = [raw[i] for i in candidate_indices]
+        median = statistics.median(pool)
+        spread = statistics.pstdev(pool) or 1e-9
+        scored = [
+            {
+                "digest": all_digests[i],
+                "score": raw[i],
+                "cosine": cosine[i],
+                "z": (raw[i] - median) / spread,
+            }
+            for i in candidate_indices
+        ]
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        if min_z is not None:
+            scored = [item for item in scored if item["z"] >= min_z]
+        return {"results": scored[: max(0, k)]}
 
 
 def handle(backend: Backend, request: dict[str, Any]) -> dict[str, Any]:
@@ -231,7 +348,8 @@ def handle(backend: Backend, request: dict[str, Any]) -> dict[str, Any]:
         return backend.unload(list(request["digests"]))
     if op == "search":
         return backend.search(request["query"], int(request.get("k", 10)),
-                               request.get("digests"))
+                               request.get("digests"), request.get("min_z"),
+                               float(request.get("hub_lambda", DEFAULT_HUB_LAMBDA)))
     raise ValueError(f"unknown op: {op!r}")
 
 

@@ -142,3 +142,86 @@ def test_query_and_passage_prefixes_differ(backend):
     # query: and passage: prefixes are different tokens in the fake bag-of-hashes
     # embedder, so the same body text must not embed identically for both kinds.
     assert query_vec != passage_vec
+
+
+def test_search_result_carries_score_cosine_and_z(backend):
+    embedded = backend.call("embed", texts=["apple banana cherry"], kind="passage")["result"]["vectors"]
+    backend.call("load", items=[{"digest": "d0", "vector": embedded[0]}])
+    result = backend.call("search", query="apple banana", k=1)["result"]["results"][0]
+    assert set(result) == {"digest", "score", "cosine", "z"}
+    # A single-candidate pool has zero spread, so z is defined as 0 rather
+    # than a division-by-zero error.
+    assert result["z"] == 0.0
+
+
+def test_min_z_filters_out_below_threshold_candidates(backend):
+    # Five distinct-but-related passages plus one that shares no tokens
+    # with the query at all: the outlier's z, relative to the other five,
+    # should be clearly negative, and a high min_z should exclude it while
+    # an absent min_z keeps it.
+    passages = [
+        "apple banana cherry",
+        "apple banana date",
+        "apple banana fig",
+        "apple banana grape",
+        "apple banana kiwi",
+        "zzz completely unrelated qqq",
+    ]
+    embedded = backend.call("embed", texts=passages, kind="passage")["result"]["vectors"]
+    items = [{"digest": f"d{i}", "vector": v} for i, v in enumerate(embedded)]
+    backend.call("load", items=items)
+
+    unfiltered = backend.call("search", query="apple banana", k=10)["result"]["results"]
+    assert len(unfiltered) == 6
+
+    filtered = backend.call("search", query="apple banana", k=10, min_z=0.5)["result"]["results"]
+    digests = {r["digest"] for r in filtered}
+    assert "d5" not in digests
+    assert digests <= {"d0", "d1", "d2", "d3", "d4"}
+
+
+def test_hub_correction_subtracts_more_from_a_broadly_similar_passage(backend):
+    # d_hub shares some vocabulary with every one of five distinct "topic"
+    # passages (a stand-in for a chunk like a link dump or sitemap that
+    # partially overlaps everything); d_isolated shares nothing with any
+    # of them. Both are then scored against a query that touches all of
+    # them equally. The hub-like passage's mean similarity to its nearest
+    # neighbours must be higher than the isolated passage's, so the hub
+    # correction subtracts noticeably more from its score than from the
+    # isolated passage's - which is the property that demotes real hub
+    # chunks without needing to hand-tune a specific end-to-end ranking.
+    topics = [
+        "cats meow whiskers purr feline",
+        "dogs bark tail fetch canine",
+        "cars engine wheels drive vehicle",
+        "trees leaves branches roots forest",
+        "music guitar piano melody song",
+    ]
+    hub_passage = "keyword cats dogs cars trees music portal directory index"
+    isolated_passage = "keyword niche distinctive specialized narrow uncommon"
+    passages = topics + [hub_passage, isolated_passage]
+    embedded = backend.call("embed", texts=passages, kind="passage")["result"]["vectors"]
+    items = [{"digest": f"topic{i}", "vector": v} for i, v in enumerate(embedded[:5])]
+    items.append({"digest": "hub", "vector": embedded[5]})
+    items.append({"digest": "isolated", "vector": embedded[6]})
+    backend.call("load", items=items)
+
+    with_hub = {r["digest"]: r for r in
+                backend.call("search", query="keyword", k=10, hub_lambda=0.5)["result"]["results"]}
+    without_hub = {r["digest"]: r for r in
+                   backend.call("search", query="keyword", k=10, hub_lambda=0.0)["result"]["results"]}
+
+    hub_penalty = without_hub["hub"]["cosine"] - with_hub["hub"]["score"]
+    isolated_penalty = without_hub["isolated"]["cosine"] - with_hub["isolated"]["score"]
+    assert hub_penalty > isolated_penalty
+
+
+def test_search_on_empty_backend_returns_no_results(backend):
+    assert backend.call("search", query="anything", k=10)["result"]["results"] == []
+
+
+def test_search_min_z_with_no_candidates_in_digest_filter_is_empty(backend):
+    embedded = backend.call("embed", texts=["alpha"], kind="passage")["result"]["vectors"]
+    backend.call("load", items=[{"digest": "only", "vector": embedded[0]}])
+    result = backend.call("search", query="alpha", k=10, digests=["not-loaded"])["result"]
+    assert result["results"] == []
