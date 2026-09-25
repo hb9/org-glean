@@ -503,23 +503,34 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
     (should (= 3 (length (org-glean--tabulated-rows))))))
 
 (ert-deftest org-glean-test-result-sort-prioritizes-exact-then-lexical-then-fuzzy ()
-  (let* ((fuzzy '((:match-type . fuzzy) (:score . 99)))
-         (lexical '((:match-type . lexical) (:score . 70)))
-         (exact '((:match-type . exact) (:score . 10)))
+  ;; Fusion ranks by :score, but an exact match is always pinned above the
+  ;; fused order regardless of its own score (see org-glean--relevance-before-p).
+  (let* ((fuzzy '((:match-type . fuzzy) (:score . 10) (:pinned)))
+         (lexical '((:match-type . lexical) (:score . 70) (:pinned)))
+         (exact '((:match-type . exact) (:score . 1) (:pinned . t)))
          (sorted (sort (list fuzzy lexical exact) #'org-glean--relevance-before-p)))
     (should (eq exact (nth 0 sorted)))
     (should (eq lexical (nth 1 sorted)))
     (should (eq fuzzy (nth 2 sorted)))))
 
 (ert-deftest org-glean-test-result-sort-retains-lexical-bm25-order ()
-  (let* ((lexical-best '((:match-type . lexical) (:score . 94.0)))
-         (lexical-next '((:match-type . lexical) (:score . 93.99)))
-         (fuzzy '((:match-type . fuzzy) (:score . 80.0)))
+  (let* ((lexical-best '((:match-type . lexical) (:score . 94.0) (:pinned)))
+         (lexical-next '((:match-type . lexical) (:score . 93.99) (:pinned)))
+         (fuzzy '((:match-type . fuzzy) (:score . 80.0) (:pinned)))
          (sorted (sort (list lexical-next fuzzy lexical-best)
                        #'org-glean--relevance-before-p)))
     (should (eq lexical-best (nth 0 sorted)))
     (should (eq lexical-next (nth 1 sorted)))
     (should (eq fuzzy (nth 2 sorted)))))
+
+(ert-deftest org-glean-test-result-sort-semantic-can-outrank-lexical ()
+  ;; The whole point of fusion: a strong semantic hit competes on score with
+  ;; a weak lexical one instead of being fixed below it by mode alone.
+  (let* ((semantic '((:match-type . semantic) (:score . 5.0) (:pinned)))
+         (lexical '((:match-type . lexical) (:score . 1.0) (:pinned)))
+         (sorted (sort (list lexical semantic) #'org-glean--relevance-before-p)))
+    (should (eq semantic (nth 0 sorted)))
+    (should (eq lexical (nth 1 sorted)))))
 
 (ert-deftest org-glean-test-duplicate-org-id-refuses-navigation ()
   (org-glean-test--corpus
@@ -1087,6 +1098,88 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (eq t (alist-get 'semantic (alist-get 'requested response))))
         (should (memq 'semantic (alist-get 'used response)))
         (should (= 0 (length (alist-get 'provider-errors response))))))))
+
+(defun org-glean-test--fusion-item (key &rest fields)
+  "Build a minimal target item alist with KEY and FIELDS for fusion tests."
+  (append (list (cons :key key) (cons :path (format "/tmp/%s.org" key))
+               (cons :kind "heading") (cons :title key) (cons :digest "d")
+               (cons :position 1))
+          fields))
+
+(ert-deftest org-glean-test-fusion-merge-combines-multi-mode-contributions ()
+  (cl-letf (((symbol-function 'file-exists-p) (lambda (_) nil)))
+    (let* ((a (org-glean-test--fusion-item "a"))
+           (b (org-glean-test--fusion-item "b"))
+           (merged (org-glean--fusion-merge
+                    (list (cons 'exact (list a))
+                          (cons 'lexical (list (org-glean-test--fusion-item "a") b)))))
+           (found-a (cl-find "a" merged :key (lambda (i) (alist-get :key i)) :test #'equal))
+           (found-b (cl-find "b" merged :key (lambda (i) (alist-get :key i)) :test #'equal)))
+      (should (= 2 (length merged)))
+      (should (= 2 (length (alist-get :modes found-a))))
+      (should (cl-some (lambda (m) (eq 'exact (car m))) (alist-get :modes found-a)))
+      (should (cl-some (lambda (m) (eq 'lexical (car m))) (alist-get :modes found-a)))
+      (should (= 1 (length (alist-get :modes found-b)))))))
+
+(ert-deftest org-glean-test-fusion-merge-sets-source-current-once ()
+  ;; Regression test: org-glean--set-freshness adds a *new* alist key, whose
+  ;; effect only survives via its return value; a caller that calls it only
+  ;; for effect (without capturing the return) silently loses the field.
+  (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t))
+            ((symbol-function 'org-glean--digest) (lambda (_) "d")))
+    (let* ((merged (org-glean--fusion-merge
+                    (list (cons 'lexical (list (org-glean-test--fusion-item "a"))))))
+           (item (car merged)))
+      (should (assq :source-current item))
+      (should (eq t (alist-get :source-current item))))))
+
+(ert-deftest org-glean-test-fusion-score-lets-semantic-outrank-weak-lexical ()
+  ;; The whole point of rank fusion: a rank-0 semantic hit must be able to
+  ;; outscore a merely-mediocre-ranked lexical hit, not be fixed below every
+  ;; lexical result by mode alone.
+  (cl-letf (((symbol-function 'file-exists-p) (lambda (_) nil)))
+    (let* ((weak-lexical (org-glean-test--fusion-item "weak"))
+           (strong-semantic (org-glean-test--fusion-item "strong"))
+           (lexical-list (append (cl-loop for n below 40
+                                          collect (org-glean-test--fusion-item (format "filler%d" n)))
+                                 (list weak-lexical)))
+           (merged (mapcar #'org-glean--fusion-finalize
+                          (org-glean--fusion-merge
+                           (list (cons 'lexical lexical-list)
+                                 (cons 'semantic (list strong-semantic))))))
+           (weak-item (cl-find "weak" merged :key (lambda (i) (alist-get :key i)) :test #'equal))
+           (strong-item (cl-find "strong" merged :key (lambda (i) (alist-get :key i)) :test #'equal)))
+      (should (> (alist-get :score strong-item) (alist-get :score weak-item))))))
+
+(ert-deftest org-glean-test-search-filtered-pool-lets-semantic-compete-with-lexical-crowd ()
+  ;; Integration-level version of the fusion-score test: even with dozens of
+  ;; lexical matches for a query, a semantic candidate must still be able to
+  ;; reach the top of the final, limit-truncated result list.
+  (org-glean-test--corpus
+    (let* ((lexical-items (cl-loop for n below 60
+                                  collect (org-glean-test--fusion-item (format "lex%d" n))))
+           (semantic-items (list (org-glean-test--fusion-item "sem0")))
+           (org-glean-semantic-provider (lambda (&rest _) semantic-items)))
+      (cl-letf (((symbol-function 'org-glean--collect-provider)
+                 (lambda (_db sql &rest _)
+                   (if (string-match-p "target_fts MATCH" sql)
+                       (list lexical-items (length lexical-items) nil nil)
+                     (list nil 0 nil nil))))
+                ((symbol-function 'file-exists-p) (lambda (_) nil)))
+        (let* ((search (org-glean-search-filtered "anything" 5 nil nil '(lexical semantic)))
+               (results (nth 0 search)))
+          (should (equal "sem0" (alist-get :key (car results)))))))))
+
+(ert-deftest org-glean-test-search-filtered-semantic-failure-preserves-other-modes ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root) "* Findable heading\nneedletext\n")
+    (org-glean-reconcile)
+    (let ((org-glean-semantic-provider (lambda (&rest _) (error "boom"))))
+      (let* ((response (org-glean-search-api "needletext" 5 nil nil '(exact lexical semantic)))
+             (results (alist-get 'results response)))
+        (should (= 1 (length results)))
+        (should (equal '(exact lexical) (alist-get 'used response)))
+        (should (eq 'semantic (alist-get 'provider (aref (alist-get 'provider-errors response) 0))))))))
 
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

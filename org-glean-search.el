@@ -15,6 +15,34 @@
 (require 'cl-lib)
 (require 'subr-x)
 
+(defcustom org-glean-fusion-pool-size 50
+  "Minimum number of candidates each provider collects before fusion.
+Every requested mode (exact, lexical, fuzzy, semantic) collects up to
+`(max LIMIT org-glean-fusion-pool-size)' of its own candidates, filtered
+before that cap, independently of how many candidates any other mode
+found. This is what lets a semantic hit compete with a lexical one instead
+of the lexical pool alone filling the caller-visible result limit before
+semantic search ever gets a chance to contribute."
+  :type 'integer
+  :group 'org-glean)
+
+(defcustom org-glean-fusion-weights
+  '((exact . 1.0) (semantic . 1.0) (lexical . 0.8) (fuzzy . 0.3))
+  "Per-mode weight in weighted reciprocal-rank fusion.
+A mode absent from this alist contributes weight 0, i.e. its candidates
+degrade to appearing only if some other mode also found the same target."
+  :type '(alist :key-type symbol :value-type number)
+  :group 'org-glean)
+
+(defcustom org-glean-fusion-k 60
+  "Rank-fusion smoothing constant.
+Each mode's contribution to a target's fused score is
+`weight / (org-glean-fusion-k + rank + 1)', RANK being 0-based. A larger
+K flattens the difference between a mode's rank-1 and rank-20 candidates;
+60 is the commonly used default for reciprocal-rank fusion."
+  :type 'integer
+  :group 'org-glean)
+
 (defun org-glean-search-exact (title &optional limit)
   "Return at most LIMIT targets whose title exactly matches TITLE."
   (org-glean--results
@@ -154,16 +182,23 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
             (and (not done) (not extra) (>= examined scan-cap))
             extra))))
 
-(defun org-glean--mark-result (item match-type rank)
-  "Add match metadata and source freshness to ITEM."
-  (setf (alist-get :match-type item) (or (alist-get :match-type item) match-type)
-        (alist-get :score item) (or (alist-get :score item)
-                                    (if (eq match-type 'exact) 100.0
-                                      (max 85.0 (- 94.0 (* rank 0.01)))))
-        (alist-get :source-current item)
+(defun org-glean--set-freshness (item)
+  "Set ITEM's :source-current by comparing its recorded digest against disk."
+  (setf (alist-get :source-current item)
         (and (file-exists-p (alist-get :path item))
              (equal (alist-get :digest item) (org-glean--digest (alist-get :path item)))))
   item)
+
+(defun org-glean--raw-score (item mode rank)
+  "Return a provider-specific score for ITEM found by MODE at 0-based RANK.
+Exact and lexical providers do not compute a real relevance number (title
+equality and BM25 ordering respectively), so this is a synthetic
+rank-derived value, informational only: it is never itself compared across
+providers, only each mode's RANK feeds the fusion formula in
+`org-glean--fusion-score'. Fuzzy and semantic providers already attach a
+real similarity number to :score; that is used as-is."
+  (or (alist-get :score item)
+      (if (eq mode 'exact) 100.0 (max 85.0 (- 94.0 (* rank 0.01))))))
 
 (defun org-glean--semantic-chunk-hit-targets (db hits)
   "Return (TARGET-KEY . SCORE) pairs from HITS, highest score first, deduped
@@ -220,97 +255,162 @@ provider's failure."
                           (push item items))))))
       (nreverse items))))
 
+(defun org-glean--fusion-weight (mode)
+  "Return MODE's configured fusion weight, or 0 if unconfigured."
+  (or (cdr (assq mode org-glean-fusion-weights)) 0.0))
+
+(defun org-glean--fusion-contribution (mode rank)
+  "Return one mode's reciprocal-rank fusion contribution at 0-based RANK."
+  (/ (org-glean--fusion-weight mode) (float (+ org-glean-fusion-k rank 1))))
+
+(defun org-glean--fusion-merge (provider-lists)
+  "Merge PROVIDER-LISTS, an alist of (MODE . RANKED-ITEMS), by target key.
+Each returned item gains a :modes list of (MODE RANK RAW-SCORE) entries,
+one per contributing provider, and has its :source-current set exactly
+once. Item identity/base fields come from whichever provider found the
+target first; the fields are the same regardless of which provider's SQL
+query produced them, since they all describe the same indexed target."
+  (let ((table (make-hash-table :test #'equal)) (order nil))
+    (dolist (pair provider-lists)
+      (let ((mode (car pair)))
+        (cl-loop for item in (cdr pair)
+                 for rank from 0
+                 do (let* ((key (alist-get :key item))
+                           (raw (org-glean--raw-score item mode rank))
+                           (existing (gethash key table)))
+                      (if existing
+                          (setf (alist-get :modes existing)
+                                (cons (list mode rank raw) (alist-get :modes existing)))
+                        (setf (alist-get :modes item) (list (list mode rank raw)))
+                        ;; org-glean--set-freshness adds a *new* alist key, which
+                        ;; only takes effect on the list head it is given back as
+                        ;; its return value -- it must be reassigned here, not
+                        ;; just called for effect.
+                        (setq item (org-glean--set-freshness item))
+                        (puthash key item table)
+                        (push key order))))))
+    (mapcar (lambda (key) (gethash key table)) (nreverse order))))
+
+(defun org-glean--fusion-finalize (item)
+  "Compute and set ITEM's fused :score, :pinned and :match-type from :modes."
+  (let* ((modes (alist-get :modes item))
+         (fused (cl-loop for (mode rank _raw) in modes
+                        sum (org-glean--fusion-contribution mode rank)))
+         (primary (car (cl-reduce
+                        (lambda (a b) (if (>= (cdr a) (cdr b)) a b))
+                        (mapcar (lambda (m) (cons (car m) (org-glean--fusion-contribution (car m) (nth 1 m))))
+                                modes)))))
+    (setf (alist-get :score item) fused
+          (alist-get :pinned item) (and (assq 'exact modes) t)
+          (alist-get :match-type item) primary)
+    item))
+
+(defun org-glean--relevance-before-p (left right)
+  "Return non-nil if LEFT has higher display relevance than RIGHT.
+Exact matches are pinned above the fused order; otherwise ties are broken
+by fused :score, then best single contributing rank, so ordering is
+deterministic across runs for the same generation and query."
+  (let ((left-pinned (alist-get :pinned left))
+        (right-pinned (alist-get :pinned right)))
+    (cond
+     ((and left-pinned (not right-pinned)) t)
+     ((and right-pinned (not left-pinned)) nil)
+     (t (let ((left-score (or (alist-get :score left) 0))
+              (right-score (or (alist-get :score right) 0)))
+          (if (/= left-score right-score)
+              (> left-score right-score)
+            (< (or (alist-get :rank left) most-positive-fixnum)
+               (or (alist-get :rank right) most-positive-fixnum))))))))
+
 (defun org-glean-search-filtered (query limit fuzzy filters &optional modes)
   "Search QUERY, applying FILTERS and :allowed-roots before LIMIT.
-MODES, when non-nil, is a list of requested provider modes among
-`exact', `lexical', `fuzzy' and `semantic'; it defaults to
-`(exact lexical)', with FUZZY as a legacy shorthand for adding `fuzzy'."
+MODES, when non-nil, is a list of requested provider modes among `exact',
+`lexical', `fuzzy' and `semantic'; it defaults to `(exact lexical)', with
+FUZZY as a legacy shorthand for adding `fuzzy'. Every requested mode
+collects its own candidate pool independently (see
+`org-glean-fusion-pool-size'), so a large lexical result set never
+prevents semantic or fuzzy candidates from being considered; results are
+then merged by target and ranked by weighted reciprocal-rank fusion (see
+`org-glean--fusion-merge' and `org-glean--relevance-before-p')."
   (let* ((db (org-glean--db))
          (limit (max 1 (min 100 (or limit org-glean-search-limit))))
+         (pool (max limit org-glean-fusion-pool-size))
          (budget (max 1 org-glean-search-work-budget))
          (page-size (max 1 (min 200 org-glean-search-page-size)))
          (remaining budget)
-         (seen (make-hash-table :test #'equal))
          (org-glean--provider-stale-seen nil)
          (used nil)
          (provider-errors nil)
-         (modes (or modes '(exact lexical)))
-         (semantic-requested (memq 'semantic modes))
-         exact lexical fuzzy-results semantic-results
-         (extra nil) (incomplete nil))
-    (when semantic-requested
+         (modes (or modes (append '(exact lexical) (when fuzzy '(fuzzy)))))
+         (provider-lists nil)
+         (any-extra nil) (any-incomplete nil))
+    (when (memq 'semantic modes)
       (if org-glean-semantic-provider
           (condition-case err
-              (let ((semantic-items
-                     (funcall org-glean-semantic-provider query filters limit)))
-                (setq semantic-results
-                      (mapcar (lambda (item)
-                                (setf (alist-get :match-type item) 'semantic)
-                                item)
-                              semantic-items))
+              (let ((items (funcall org-glean-semantic-provider query filters pool)))
+                (push (cons 'semantic items) provider-lists)
                 (push 'semantic used))
             (error (push (cons 'semantic (error-message-string err)) provider-errors)))
         ;; Explicitly report the missing capability. Never label lexical results
         ;; as semantic or silently claim the requested mode ran.
         (push (cons 'semantic "No semantic provider is configured") provider-errors)))
-    (when (and (memq 'exact modes) (stringp query) (not (string-empty-p query)))
+    (when (and (memq 'exact modes) (stringp query) (not (string-empty-p query))
+               (> remaining 0))
       (let ((org-glean--provider-work-count 0))
         (condition-case err
-            (progn
-              (let ((page (org-glean--collect-provider
-                           db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
-                           (vector query) filters (1+ limit) remaining page-size seen)))
-                (setq exact (nth 0 page) remaining (- remaining (nth 1 page))
-                      incomplete (nth 2 page) extra (nth 3 page)))
+            (let ((page (org-glean--collect-provider
+                        db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
+                        (vector query) filters pool remaining page-size
+                        (make-hash-table :test #'equal))))
+              (push (cons 'exact (nth 0 page)) provider-lists)
+              (setq remaining (- remaining (nth 1 page))
+                    any-incomplete (or any-incomplete (nth 2 page))
+                    any-extra (or any-extra (nth 3 page)))
               (push 'exact used))
           (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                   (push (cons 'exact (error-message-string err)) provider-errors)))))
-    (when (and (memq 'lexical modes) (not extra) (not incomplete) (> remaining 0))
+    (when (and (memq 'lexical modes) (> remaining 0))
       (let ((fts (org-glean--fts-pattern query)))
         (when fts
           (let ((org-glean--provider-work-count 0))
             (condition-case err
-                (progn
-                  (let ((page (org-glean--collect-provider
-                               db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
-                               (vector fts) filters (1+ (- limit (length exact)))
-                               remaining page-size seen)))
-                    (setq lexical (nth 0 page) remaining (- remaining (nth 1 page))
-                          incomplete (nth 2 page) extra (nth 3 page)))
+                (let ((page (org-glean--collect-provider
+                            db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
+                            (vector fts) filters pool remaining page-size
+                            (make-hash-table :test #'equal))))
+                  (push (cons 'lexical (nth 0 page)) provider-lists)
+                  (setq remaining (- remaining (nth 1 page))
+                        any-incomplete (or any-incomplete (nth 2 page))
+                        any-extra (or any-extra (nth 3 page)))
                   (push 'lexical used))
               (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                       (push (cons 'lexical (error-message-string err)) provider-errors)))))))
     (when (and (or fuzzy (memq 'fuzzy modes))
                (stringp query) (not (string-empty-p (string-trim query)))
-               (not extra) (not incomplete) (> remaining 0)
-               (< (+ (length exact) (length lexical)) (1+ limit)))
+               (> remaining 0))
       (let ((org-glean--provider-work-count 0))
         (condition-case err
-            (progn
-              (let ((page (org-glean--collect-fuzzy
-                           db query filters (1+ (- limit (length exact) (length lexical)))
-                           remaining page-size seen)))
-                (setq fuzzy-results (nth 0 page) remaining (- remaining (nth 1 page))
-                      incomplete (nth 2 page) extra (nth 3 page)))
+            (let ((page (org-glean--collect-fuzzy
+                        db query filters pool remaining page-size
+                        (make-hash-table :test #'equal))))
+              (push (cons 'fuzzy (nth 0 page)) provider-lists)
+              (setq remaining (- remaining (nth 1 page))
+                    any-incomplete (or any-incomplete (nth 2 page))
+                    any-extra (or any-extra (nth 3 page)))
               (push 'fuzzy used))
           (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                   (push (cons 'fuzzy (error-message-string err)) provider-errors)))))
-    (let* ((all (append (mapcar (lambda (item) (org-glean--mark-result item 'exact 0)) exact)
-                        (cl-loop for item in lexical for rank from 0
-                                 collect (org-glean--mark-result item 'lexical rank))
-                        (mapcar (lambda (item) (org-glean--mark-result item 'fuzzy 0))
-                                fuzzy-results)
-                        (mapcar (lambda (item) (org-glean--mark-result item 'semantic 0))
-                                semantic-results)))
-           (has-extra (> (length all) limit))
-           (all (cl-subseq all 0 (min (length all) (1+ limit))))
-           (truncated (or extra incomplete provider-errors has-extra))
+    (let* ((merged (mapcar #'org-glean--fusion-finalize
+                           (org-glean--fusion-merge (nreverse provider-lists))))
+           (sorted (sort merged #'org-glean--relevance-before-p))
+           (has-extra (> (length sorted) limit))
            (stale (or org-glean--provider-stale-seen
-                      (cl-some (lambda (item) (not (alist-get :source-current item))) all)))
-           (results (cl-subseq all 0 (min limit (length all)))))
+                      (cl-some (lambda (item) (not (alist-get :source-current item))) sorted)))
+           (results (cl-subseq sorted 0 (min limit (length sorted))))
+           (truncated (or any-extra any-incomplete provider-errors has-extra)))
       (setq org-glean--last-search-completeness
-            (cond ((or incomplete provider-errors) 'incomplete)
-                  ((or extra has-extra) 'truncated)
+            (cond ((or any-incomplete provider-errors) 'incomplete)
+                  ((or any-extra has-extra) 'truncated)
                   (t 'complete))
             org-glean--last-search-used (nreverse used)
             org-glean--last-search-provider-errors (nreverse provider-errors))
@@ -331,7 +431,10 @@ served (for example `semantic' with no provider configured) is absent from
          (all-results (nth 0 search))
          (truncated (nth 1 search))
          (stale-p (nth 2 search))
-         (results (sort all-results #'org-glean--relevance-before-p))
+         ;; org-glean-search-filtered already returns its results sorted by
+         ;; fusion order; re-sorting here would be redundant but harmless,
+         ;; kept for callers that construct a result list some other way.
+         (results (sort (copy-sequence all-results) #'org-glean--relevance-before-p))
           (results (cl-loop for item in results for rank from 1
                            for next = (nth rank results)
                            for score = (or (alist-get :score item) 0)
@@ -339,11 +442,14 @@ served (for example `semantic' with no provider configured) is absent from
                            collect (append item
                                             `((:rank . ,rank)
                                               (:margin . ,(- score next-score))
-                                             (:match-reason . ,(pcase (alist-get :match-type item)
-                                                                 ('exact "exact title")
-                                                                 ('fuzzy "fuzzy title or heading")
-                                                                 ('semantic "semantic similarity")
-                                                                 (_ "FTS5 lexical match")))
+                                             (:match-reason . ,(mapconcat
+                                                                (lambda (m)
+                                                                  (format "%s #%d" (car m) (1+ (nth 1 m))))
+                                                                (sort (copy-sequence (alist-get :modes item))
+                                                                      (lambda (a b)
+                                                                        (> (org-glean--fusion-contribution (car a) (nth 1 a))
+                                                                           (org-glean--fusion-contribution (car b) (nth 1 b)))))
+                                                                " + "))
                                              (:link . ,(if (alist-get :org-id item)
                                                            (format "[[id:%s][%s]]"
                                                                    (alist-get :org-id item)
@@ -375,27 +481,6 @@ served (for example `semantic' with no provider configured) is absent from
                                          (message . ,(cdr failure))))
                                      org-glean--last-search-provider-errors)))
         (results . ,(vconcat results)))))
-
-(defun org-glean--result-sort-key (item)
-  "Return the results-buffer order key for ITEM.
-This is priority-tier ordering (exact, then lexical, then semantic, then
-fuzzy), not a calibrated fused score across providers; see ROADMAP.md
-phase 2 for deterministic rank fusion."
-  (list (or (cdr (assq (alist-get :match-type item)
-                       '((exact . 0) (lexical . 1) (semantic . 2) (fuzzy . 3)))) 4)))
-
-(defun org-glean--relevance-before-p (left right)
-  "Return non-nil if LEFT has higher display relevance than RIGHT."
-  (let ((left-key (org-glean--result-sort-key left))
-        (right-key (org-glean--result-sort-key right)))
-    (if (= (car left-key) (car right-key))
-        (let ((left-score (or (alist-get :score left) 0))
-              (right-score (or (alist-get :score right) 0)))
-          (if (= left-score right-score)
-              (< (or (alist-get :rank left) most-positive-fixnum)
-                 (or (alist-get :rank right) most-positive-fixnum))
-            (> left-score right-score)))
-      (< (car left-key) (car right-key)))))
 
 ;; org-glean-semantic-provider defaults to nil (semantic mode explicitly
 ;; unavailable) until this file defines a real implementation. Now that it
