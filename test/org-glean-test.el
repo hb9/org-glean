@@ -112,6 +112,21 @@
       (should (string-match-p "fixture projection error"
                               (cdar org-glean--last-errors))))))
 
+(ert-deftest org-glean-test-semantic-mode-is-explicitly-unavailable ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "semantic.org" root)
+                           "* Information retrieval\nsearchable text\n")
+    (org-glean-reconcile)
+    (let* ((response (org-glean-search-api "searchable" 10 nil nil
+                                           '(exact lexical fuzzy semantic)))
+           (errors (alist-get 'provider-errors response)))
+      (should (eq t (alist-get 'semantic (alist-get 'requested response))))
+      (should (equal '(exact lexical fuzzy) (alist-get 'used response)))
+      (should (eq 'incomplete (alist-get 'completeness response)))
+      (should (eq 'provider-error (alist-get 'degraded response)))
+      (should (= 1 (length errors)))
+      (should (eq 'semantic (alist-get 'provider (aref errors 0)))))))
+
 (ert-deftest org-glean-test-reconcile-and-search ()
   (org-glean-test--corpus
     (let* ((nested (expand-file-name "nested/a.org" root))

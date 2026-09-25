@@ -58,6 +58,16 @@ An empty INCLUDES list accepts every .org file."
   :type 'integer
   :group 'org-glean)
 
+(defcustom org-glean-semantic-provider nil
+  "Optional function implementing semantic candidate retrieval.
+The function is called with QUERY, FILTERS and LIMIT, and must return a list
+of target result plists using the active target generation, with FILTERS
+applied before LIMIT. Nil means semantic retrieval is unavailable: a request
+for the `semantic' mode is reported as unavailable in `provider-errors'
+rather than silently dropped or served from another provider."
+  :type '(choice (const :tag "Unavailable" nil) function)
+  :group 'org-glean)
+
 (defvar org-glean--last-search-completeness 'complete)
 (defvar org-glean--last-search-examined 0)
 (defvar org-glean--last-search-used nil)
@@ -746,8 +756,11 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
              (equal (alist-get :digest item) (org-glean--digest (alist-get :path item)))))
   item)
 
-(defun org-glean-search-filtered (query limit fuzzy filters)
-  "Search QUERY, applying FILTERS and :allowed-roots before LIMIT."
+(defun org-glean-search-filtered (query limit fuzzy filters &optional modes)
+  "Search QUERY, applying FILTERS and :allowed-roots before LIMIT.
+MODES, when non-nil, is a list of requested provider modes among
+`exact', `lexical', `fuzzy' and `semantic'; it defaults to
+`(exact lexical)', with FUZZY as a legacy shorthand for adding `fuzzy'."
   (let* ((db (org-glean--db))
          (limit (max 1 (min 100 (or limit org-glean-search-limit))))
          (budget (max 1 org-glean-search-work-budget))
@@ -757,9 +770,26 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
          (org-glean--provider-stale-seen nil)
          (used nil)
          (provider-errors nil)
-         exact lexical fuzzy-results
+         (modes (or modes '(exact lexical)))
+         (semantic-requested (memq 'semantic modes))
+         exact lexical fuzzy-results semantic-results
          (extra nil) (incomplete nil))
-    (when (and (stringp query) (not (string-empty-p query)))
+    (when semantic-requested
+      (if org-glean-semantic-provider
+          (condition-case err
+              (let ((semantic-items
+                     (funcall org-glean-semantic-provider query filters limit)))
+                (setq semantic-results
+                      (mapcar (lambda (item)
+                                (setf (alist-get :match-type item) 'semantic)
+                                item)
+                              semantic-items))
+                (push 'semantic used))
+            (error (push (cons 'semantic (error-message-string err)) provider-errors)))
+        ;; Explicitly report the missing capability. Never label lexical results
+        ;; as semantic or silently claim the requested mode ran.
+        (push (cons 'semantic "No semantic provider is configured") provider-errors)))
+    (when (and (memq 'exact modes) (stringp query) (not (string-empty-p query)))
       (let ((org-glean--provider-work-count 0))
         (condition-case err
             (progn
@@ -771,7 +801,7 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
               (push 'exact used))
           (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                   (push (cons 'exact (error-message-string err)) provider-errors)))))
-    (when (and (not extra) (not incomplete) (> remaining 0))
+    (when (and (memq 'lexical modes) (not extra) (not incomplete) (> remaining 0))
       (let ((fts (org-glean--fts-pattern query)))
         (when fts
           (let ((org-glean--provider-work-count 0))
@@ -786,7 +816,8 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
                   (push 'lexical used))
               (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                       (push (cons 'lexical (error-message-string err)) provider-errors)))))))
-    (when (and fuzzy (stringp query) (not (string-empty-p (string-trim query)))
+    (when (and (or fuzzy (memq 'fuzzy modes))
+               (stringp query) (not (string-empty-p (string-trim query)))
                (not extra) (not incomplete) (> remaining 0)
                (< (+ (length exact) (length lexical)) (1+ limit)))
       (let ((org-glean--provider-work-count 0))
@@ -800,33 +831,39 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
               (push 'fuzzy used))
           (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                   (push (cons 'fuzzy (error-message-string err)) provider-errors)))))
-      (let* ((all (append (mapcar (lambda (item) (org-glean--mark-result item 'exact 0)) exact)
+    (let* ((all (append (mapcar (lambda (item) (org-glean--mark-result item 'exact 0)) exact)
                         (cl-loop for item in lexical for rank from 0
                                  collect (org-glean--mark-result item 'lexical rank))
                         (mapcar (lambda (item) (org-glean--mark-result item 'fuzzy 0))
-                                fuzzy-results)))
+                                fuzzy-results)
+                        (mapcar (lambda (item) (org-glean--mark-result item 'semantic 0))
+                                semantic-results)))
            (has-extra (> (length all) limit))
            (all (cl-subseq all 0 (min (length all) (1+ limit))))
            (truncated (or extra incomplete provider-errors has-extra))
            (stale (or org-glean--provider-stale-seen
                       (cl-some (lambda (item) (not (alist-get :source-current item))) all)))
            (results (cl-subseq all 0 (min limit (length all)))))
-       (setq org-glean--last-search-completeness
-             (cond ((or incomplete provider-errors) 'incomplete)
-                   ((or extra has-extra) 'truncated)
-                   (t 'complete))
-             org-glean--last-search-used (nreverse used)
-             org-glean--last-search-provider-errors (nreverse provider-errors))
+      (setq org-glean--last-search-completeness
+            (cond ((or incomplete provider-errors) 'incomplete)
+                  ((or extra has-extra) 'truncated)
+                  (t 'complete))
+            org-glean--last-search-used (nreverse used)
+            org-glean--last-search-provider-errors (nreverse provider-errors))
       (setq org-glean--last-search-examined (- budget remaining))
-       (list results truncated stale))))
+      (list results truncated stale))))
 
-(defun org-glean-search-api (query &optional limit fuzzy filters)
+(defun org-glean-search-api (query &optional limit fuzzy filters modes)
   "Return a versioned, bounded result-set for QUERY.
 FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
 :exclude-property-values, :max-heading-level, :exclude-titles, and
-:allowed-roots. Filters and scope are applied before the result limit."
+:allowed-roots. MODES, when non-nil, is a list of requested provider modes
+among `exact', `lexical', `fuzzy' and `semantic'; a mode that could not be
+served (for example `semantic' with no provider configured) is absent from
+`used' and reported in `provider-errors' rather than silently dropped."
   (let* ((limit (max 1 (min 100 (or limit org-glean-search-limit))))
-         (search (org-glean-search-filtered query limit fuzzy filters))
+         (modes (or modes (append '(exact lexical) (when fuzzy '(fuzzy)))))
+         (search (org-glean-search-filtered query limit fuzzy filters modes))
          (all-results (nth 0 search))
          (truncated (nth 1 search))
          (stale-p (nth 2 search))
@@ -841,6 +878,7 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
                                              (:match-reason . ,(pcase (alist-get :match-type item)
                                                                  ('exact "exact title")
                                                                  ('fuzzy "fuzzy title or heading")
+                                                                 ('semantic "semantic similarity")
                                                                  (_ "FTS5 lexical match")))
                                              (:link . ,(if (alist-get :org-id item)
                                                            (format "[[id:%s][%s]]"
@@ -856,8 +894,7 @@ FUZZY enables bounded title/heading matching. FILTERS is a plist supporting
           (completeness org-glean--last-search-completeness))
     `((schema-version . 1)
       (query . ,query)
-      (requested . ((lexical . t) (fuzzy . ,(if fuzzy t :false))
-                    (filters . ,(if filters t :false))))
+      (requested . ,(mapcar (lambda (mode) (cons mode t)) modes))
        (used . ,org-glean--last-search-used)
         (degraded . ,(cond (org-glean--last-search-provider-errors 'provider-error)
                            ((eq completeness 'incomplete) 'incomplete)

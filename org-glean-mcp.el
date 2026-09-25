@@ -31,6 +31,8 @@ An empty value falls back to the configured Org Glean roots."
              (exclude-titles (append (alist-get 'exclude_titles args) nil))
              (property-key (alist-get 'property_key args))
              (property-value (alist-get 'property_value args))
+              (modes (let ((requested (mapcar #'intern (append (alist-get 'modes args) nil))))
+                       (or requested '(exact lexical fuzzy))))
               (roots (or org-glean-mcp-allowed-roots
                          (mapcar #'cadr org-glean-roots)))
               (filters (list :allowed-roots roots
@@ -42,7 +44,7 @@ An empty value falls back to the configured Org Glean roots."
              response)
         (unless (stringp query) (error "`query' string is required"))
          (unless roots (error "No Org Glean root is allowed for MCP search"))
-         (setq response (org-glean-search-api query limit t filters))
+         (setq response (org-glean-search-api query limit (memq 'fuzzy modes) filters modes))
         (json-encode (org-glean-mcp--json-normalize response)))
     (error (json-encode `((schema-version . 1)
                           (error . ,(error-message-string err)))))))
@@ -90,7 +92,10 @@ An empty value falls back to the configured Org Glean roots."
                    (exclude_titles . ((type . "array")
                                       (items . ((type . "string")))))
                    (property_key . ((type . "string")))
-                   (property_value . ((type . "string")))))
+                   (property_value . ((type . "string")))
+                   (modes . ((type . "array")
+                             (items . ((type . "string")
+                                       (enum . ["exact" "lexical" "fuzzy" "semantic"])))))))
     (required . ["query"]))
   "MCP input schema for bounded Org Glean search.")
 
