@@ -143,16 +143,19 @@ bundled scripts such as semantic/org_glean_embed.py.")
               (setq match (cons name root)))))))
     match))
 
+(defun org-glean--path-in-roots-p (path roots)
+  "Return non-nil when PATH belongs to one of ROOTS, without symlink escape."
+  (or (null roots)
+      (and path (file-exists-p path)
+           (cl-some (lambda (root)
+                      (let ((root (file-name-as-directory (file-truename root)))
+                            (true-path (file-truename path)))
+                        (and (file-directory-p root) (file-in-directory-p true-path root))))
+                    roots))))
+
 (defun org-glean--in-roots-p (item roots)
   "Return non-nil when ITEM belongs to one of ROOTS, without symlink escape."
-  (or (null roots)
-      (let ((path (alist-get :path item)))
-        (and path (file-exists-p path)
-             (cl-some (lambda (root)
-                        (let ((root (file-name-as-directory (file-truename root)))
-                              (true-path (file-truename path)))
-                          (and (file-directory-p root) (file-in-directory-p true-path root))))
-                      roots)))))
+  (org-glean--path-in-roots-p (alist-get :path item) roots))
 
 (provide 'org-glean-core)
 ;;; org-glean-core.el ends here

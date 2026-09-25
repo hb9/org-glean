@@ -147,5 +147,55 @@ to any value."
                  (idempotentHint . t)
                  (openWorldHint . :false))))
 
+(defun org-glean-mcp--outline-handler (args)
+  "Handle MCP outline ARGS and return JSON per-file outline structure."
+  (condition-case err
+      (let* ((files (or (append (alist-get 'files args) nil)
+                        (and (alist-get 'file args) (list (alist-get 'file args)))))
+             (max-level (alist-get 'max_heading_level args))
+             (roots (or org-glean-mcp-allowed-roots
+                       (mapcar #'cadr org-glean-roots)))
+             (allowed nil) (denied nil))
+        (unless files (error "`file' or `files' is required"))
+        (unless roots (error "No Org Glean root is allowed for MCP outline"))
+        (dolist (file files)
+          (if (org-glean--path-in-roots-p file roots)
+              (push file allowed)
+            (push file denied)))
+        (let* ((result (org-glean-outline (nreverse allowed) max-level))
+               (errors (append (alist-get :errors result)
+                               (mapcar (lambda (file)
+                                         `((:path . ,file)
+                                           (:message . "Path is outside every allowed root")))
+                                       (nreverse denied)))))
+          (json-encode (org-glean-mcp--json-normalize
+                        `((:outlines . ,(vconcat (alist-get :outlines result)))
+                          (:errors . ,(vconcat errors)))))))
+    (error (json-encode `((error . ,(error-message-string err)))))))
+
+(defconst org-glean-mcp--outline-input-schema
+  '((type . "object")
+    (properties . ((file . ((type . "string")
+                             (description . "Absolute path to one Org file")))
+                   (files . ((type . "array") (items . ((type . "string")))
+                             (description . "Absolute paths to several Org files, e.g. the top few candidate files from org-glean_search")))
+                   (max_heading_level . ((type . "integer") (minimum . 1)
+                                          (description . "Omit headings deeper than this from the response; the file's true heading count is still reported")))))
+    (required . []))
+  "MCP input schema for the read-only Org Glean outline tool.")
+
+(mcp-server-register-tool
+ (make-mcp-server-tool
+   :name "org-glean_outline"
+  :title "Get whole-file Org outline with Org Glean"
+  :description
+   "Return one or more Org files' whole outline structure in a single call: every heading's level, title, TODO keyword, whether that keyword is a 'done' state, priority, tags, org-id (if it has one), outline path and inherited properties. Meant to follow org-glean_search: once search has named a plausible destination file, this tool gives an agent what it needs to decide WHERE within that file to place something — an existing task section, an existing cluster of active TODOs, or a new heading at the end — org-glean makes no placement decision itself, an agent using this tool does. Always reads fresh from disk into a throwaway buffer, never a live Emacs buffer: it never mints an Org ID as a side effect (unlike org-get-node/org-search with auto-id enabled) and never reflects unsaved edits in an open buffer. A path outside the allowed roots is reported as a per-file error, not silently dropped or a reason to fail every other requested file."
+   :input-schema org-glean-mcp--outline-input-schema
+  :function #'org-glean-mcp--outline-handler
+  :annotations '((readOnlyHint . t)
+                 (destructiveHint . :false)
+                 (idempotentHint . t)
+                 (openWorldHint . :false))))
+
 (provide 'org-glean-mcp)
 ;;; org-glean-mcp.el ends here

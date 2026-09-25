@@ -130,6 +130,91 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (= 0 (plist-get status :semantic-coverage-chunks)))
         (should (= 2 (plist-get status :semantic-coverage-total)))))))
 
+(ert-deftest org-glean-test-outline-returns-headings-with-structure ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "note.org" root)))
+      (org-glean-test--write
+       path
+       (concat "#+title: Sample\n#+PROPERTY: OWNER team-a\n"
+               "* Tasks\n:PROPERTIES:\n:ID: root-tasks-id\n:END:\n"
+               "** TODO [#A] Do the thing :urgent:work:\nbody\n"
+               "** DONE Old thing\nCLOSED: [2026-01-01]\n"
+               "* Notes\nprose\n"))
+      (let* ((result (org-glean-outline path))
+             (outline (car (alist-get :outlines result)))
+             (headings (alist-get :headings outline)))
+        (should (null (alist-get :errors result)))
+        (should (equal "Sample" (alist-get :title outline)))
+        (should (equal '((OWNER . "team-a")) (alist-get :properties outline)))
+        (should (= 4 (length headings)))
+        (should (= 4 (alist-get :heading-count outline)))
+        (should-not (alist-get :truncated outline))
+        (let ((todo-heading (nth 1 headings)))
+          (should (equal "Do the thing" (alist-get :title todo-heading)))
+          (should (equal "TODO" (alist-get :todo-keyword todo-heading)))
+          (should-not (alist-get :closed todo-heading))
+          (should (equal "A" (alist-get :priority todo-heading)))
+          (should (equal '("urgent" "work") (alist-get :tags todo-heading)))
+          (should (equal '("Tasks" "Do the thing") (alist-get :outline-path todo-heading)))
+          ;; Inherits the file-level #+PROPERTY as well as its own ancestor's
+          ;; ID -- generic property inheritance, same mechanism used by
+          ;; org-glean-search's :property-filters, not a special case here.
+          (should (equal "team-a" (alist-get 'OWNER (alist-get :properties todo-heading))))
+          (should (equal "root-tasks-id" (alist-get 'ID (alist-get :properties todo-heading)))))
+        (let ((done-heading (nth 2 headings)))
+          (should (equal "DONE" (alist-get :todo-keyword done-heading)))
+          (should (alist-get :closed done-heading)))))))
+
+(ert-deftest org-glean-test-outline-max-level-filters-headings-not-counts ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "note.org" root)))
+      (org-glean-test--write
+       path "* One\n** Two\n*** Three\n")
+      (let* ((result (org-glean-outline path 1))
+             (outline (car (alist-get :outlines result))))
+        (should (= 1 (length (alist-get :headings outline))))
+        ;; heading-count/truncated describe the WHOLE file, independent of
+        ;; the max-level depth filter, which only trims :headings.
+        (should (= 3 (alist-get :heading-count outline)))))))
+
+(ert-deftest org-glean-test-outline-caps-headings-and-reports-truncated ()
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "note.org" root))
+          (org-glean-outline-max-headings 3))
+      (org-glean-test--write
+       path (mapconcat (lambda (n) (format "* Heading %d\n" n)) (number-sequence 1 5) ""))
+      (let* ((result (org-glean-outline path))
+             (outline (car (alist-get :outlines result))))
+        (should (= 3 (length (alist-get :headings outline))))
+        (should (= 5 (alist-get :heading-count outline)))
+        (should (alist-get :truncated outline))))))
+
+(ert-deftest org-glean-test-outline-collects-per-file-errors-without-aborting ()
+  (org-glean-test--corpus
+    (let ((good (expand-file-name "good.org" root))
+          (missing (expand-file-name "missing.org" root)))
+      (org-glean-test--write good "* Heading\n")
+      (let ((result (org-glean-outline (list good missing))))
+        (should (= 1 (length (alist-get :outlines result))))
+        (should (equal good (alist-get :path (car (alist-get :outlines result)))))
+        (should (= 1 (length (alist-get :errors result))))
+        (should (equal missing (alist-get :path (car (alist-get :errors result)))))))))
+
+(ert-deftest org-glean-test-outline-never-writes-to-the-file-or-mints-ids ()
+  ;; The whole point of reading from disk into a throwaway temp buffer
+  ;; instead of a live Emacs buffer: no auto-id side effect, unlike
+  ;; org-get-node/org-search with mcp-server-emacs-tools-org-auto-id on,
+  ;; and no risk of ever saving anything.
+  (org-glean-test--corpus
+    (let ((path (expand-file-name "note.org" root))
+          (before nil) (after nil))
+      (org-glean-test--write path "* No ID here\nbody\n")
+      (setq before (with-temp-buffer (insert-file-contents path) (buffer-string)))
+      (org-glean-outline path)
+      (setq after (with-temp-buffer (insert-file-contents path) (buffer-string)))
+      (should (equal before after))
+      (should-not (get-file-buffer path)))))
+
 (ert-deftest org-glean-test-reconcile-populates-chunks ()
   (org-glean-test--corpus
     (let ((org-glean-chunk-min-words 1))
@@ -901,6 +986,51 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
              (decoded (json-parse-string json :object-type 'alist)))
         (should (= 1 (length (alist-get 'results decoded))))
         (should (equal "Visible" (alist-get 'title (aref (alist-get 'results decoded) 0))))))))
+
+(ert-deftest org-glean-test-mcp-outline-returns-structure-for-allowed-file ()
+  (org-glean-test--corpus
+    (let* ((path (expand-file-name "note.org" root))
+           (org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write path "* TODO [#B] Do it\nbody\n")
+      (let* ((json (org-glean-mcp--outline-handler `((file . ,path))))
+             (decoded (json-parse-string json :object-type 'alist))
+             (outline (aref (alist-get 'outlines decoded) 0))
+             (heading (aref (alist-get 'headings outline) 0)))
+        (should (equal path (alist-get 'path outline)))
+        (should (equal "Do it" (alist-get 'title heading)))
+        (should (equal "TODO" (alist-get 'todo-keyword heading)))
+        (should (equal "B" (alist-get 'priority heading)))
+        (should (eq :null (alist-get 'closed heading)))
+        (should (= 0 (length (alist-get 'errors decoded))))))))
+
+(ert-deftest org-glean-test-mcp-outline-rejects-path-outside-allowed-roots ()
+  (org-glean-test--corpus
+    (let* ((allowed (expand-file-name "allowed" root))
+           (other (expand-file-name "other" root))
+           (org-glean-roots (list (list "all" root nil nil)))
+           (org-glean-mcp-allowed-roots (list allowed)))
+      (org-glean-test--write (expand-file-name "a.org" other) "* Outside\n")
+      (let* ((json (org-glean-mcp--outline-handler
+                    `((file . ,(expand-file-name "a.org" other)))))
+             (decoded (json-parse-string json :object-type 'alist)))
+        (should (= 0 (length (alist-get 'outlines decoded))))
+        (should (= 1 (length (alist-get 'errors decoded))))
+        (should (string-match-p "outside every allowed root"
+                                (alist-get 'message (aref (alist-get 'errors decoded) 0))))))))
+
+(ert-deftest org-glean-test-mcp-outline-accepts-several-files-and-max-level ()
+  (org-glean-test--corpus
+    (let* ((path-a (expand-file-name "a.org" root))
+           (path-b (expand-file-name "b.org" root))
+           (org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write path-a "* One\n** Two\n")
+      (org-glean-test--write path-b "* Three\n")
+      (let* ((json (org-glean-mcp--outline-handler
+                    `((files . [,path-a ,path-b]) (max_heading_level . 1))))
+             (decoded (json-parse-string json :object-type 'alist))
+             (outlines (alist-get 'outlines decoded)))
+        (should (= 2 (length outlines)))
+        (should (= 1 (length (alist-get 'headings (aref outlines 0)))))))))
 
 (ert-deftest org-glean-test-results-buffer-renders-and-visits-rows ()
   (org-glean-test--corpus

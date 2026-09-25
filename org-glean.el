@@ -17,6 +17,7 @@
 (require 'org-glean-chunk)
 (require 'org-glean-store)
 (require 'org-glean-project)
+(require 'org-glean-outline)
 (require 'org-glean-semantic)
 (require 'org-glean-index)
 (require 'org-glean-search)

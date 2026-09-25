@@ -320,6 +320,62 @@ The optional `:allowed-roots` value is fail-closed when explicitly supplied as
 an empty list. When omitted from a local Lisp call, configured `org-glean-roots`
 govern search. MCP always requires a non-empty explicit allowed-root set.
 
+### `org-glean-outline` (whole-file structure, no placement logic)
+
+```elisp
+(org-glean-outline FILES &optional MAX-LEVEL)
+;; -> ((:outlines . (OUTLINE ...)) (:errors . (((:path . PATH) (:message . STRING)) ...)))
+```
+
+Once `org-glean-search`/`org-glean-search-api` has named a plausible
+destination file, an agent needs that file's actual structure to decide
+*where* within it something belongs — an existing task section, an
+existing cluster of active TODOs, or a new heading at the end.
+`org-glean-outline` returns that structure; it makes no placement
+decision itself (see `ROADMAP.md`'s explicit scope note — this is a
+deliberate boundary, not a missing feature).
+
+`FILES` is one path or a list of paths (e.g. the top few candidate files
+from a search). One `OUTLINE` is:
+
+```elisp
+((:path . STRING) (:title . STRING) (:properties . PROPERTY-ALIST)
+ (:headings . (HEADING ...)) (:heading-count . INTEGER) (:truncated . BOOLEAN))
+```
+
+and one `HEADING`:
+
+```elisp
+((:level . INTEGER) (:title . STRING) (:todo-keyword . STRING-OR-NIL)
+ (:closed . BOOLEAN) (:priority . STRING-OR-NIL) (:tags . STRING-LIST)
+ (:org-id . STRING-OR-NIL) (:outline-path . STRING-LIST)
+ (:properties . PROPERTY-ALIST))
+```
+
+`:closed` is whether `:todo-keyword` is one of Org's own done keywords
+(`org-done-keywords`, honoring a file's own `#+TODO:` line), so a caller
+does not need to know Org's keyword sets itself to skip DONE/CANCELLED
+entries when judging active task structure. `MAX-LEVEL`, when given,
+omits headings deeper than it from `:headings`; `:heading-count` and
+`:truncated` always describe the *whole* file regardless, since
+`org-glean-outline-max-headings` (a hard response-size cap, default 500)
+is a different concern from the depth filter.
+
+Every file is read fresh from disk into a throwaway temp buffer — never a
+live Emacs buffer, exactly like `org-glean-project.el`'s own indexing
+pass. This means no auto-id side effect (unlike MCP `org-get-node`/
+`org-search` with `mcp-server-emacs-tools-org-auto-id` on) and no
+reflection of unsaved edits in an open buffer: this is a pure read, it
+never writes anything, anywhere, ever. A missing or unparseable path
+never aborts the other requested files — it is collected in `:errors`,
+the same pattern `org-glean-search-api` uses for `provider-errors`.
+
+The MCP tool `org-glean_outline` wraps this with the same allowed-roots
+enforcement `org-glean_search` uses: a requested path outside every
+allowed root is reported as a per-file error (`"Path is outside every
+allowed root"`), not silently dropped or a reason to fail every other
+requested file.
+
 ### Planned entry points
 
 `org-glean-status`, `org-glean-show-errors` and `org-glean-install` are

@@ -365,8 +365,50 @@ as validated defaults for now; re-run the eval before changing them.
 
 ## Phase 3 — Agents
 
-- `org-glean_search` (evidence, coverage, freshness, granularity),
-  `org-glean_similar`, `org-glean_suggest_location` as MCP tools.
+- [x] **`org-glean_search`** (MCP tool, already shipped in earlier phases):
+      evidence, freshness, completeness; `property_filters` (below) instead
+      of a fixed set of metadata filters.
+- [x] **Generic `property_filters`** (`org-glean-search.el`,
+      `org-glean-mcp.el`). The filter mechanism special-cased exactly one
+      property: `:exclude-property-values` checked an item's dedicated
+      `:capture-policy` field, with an implicit `"eligible"` default when
+      unset. New `:property-filters` (MCP `property_filters`) constrains
+      on any inherited property — a heading's own drawer, or a file-level
+      `#+PROPERTY` line it inherits — with ops `equals`/`not-equals`/
+      `in`/`not-in`/`exists`/`missing`, ANDed together, and no property
+      name hard-coded anywhere in the mechanism itself. A property never
+      set anywhere on a target is simply absent; no op substitutes an
+      implicit default value for it, `CAPTURE_POLICY` included. The old
+      `:exclude-property-values`/`:property-key`/`:property-value` keys
+      are kept working via a single translation shim
+      (`org-glean--normalize-filters`) so every existing caller is
+      unaffected. 10 new ERT tests cover each op, case-insensitivity,
+      ANDing, the no-implicit-default property, and both deprecated
+      aliases end to end.
+- [x] **`org-glean_outline`** (new `org-glean-outline.el` + MCP tool):
+      whole-file heading structure (level, title, TODO keyword, whether
+      it is a done keyword, priority, tags, org-id, outline path,
+      inherited properties) for one or more files in a single call.
+      Explicitly does **not** propose a placement — that responsibility
+      moved to the calling agent, which now gets real structure to reason
+      over instead of org-glean guessing at a heuristic. This supersedes
+      the `org-glean_suggest_location` idea below: giving an agent the
+      actual outline is more honest and more generally useful than a
+      fixed heuristic that would only ever cover the cases it was
+      written for. Reads
+      every file fresh from disk into a throwaway temp buffer, never a
+      live Emacs buffer, so it has no auto-id side effect (unlike MCP
+      `org-get-node`/`org-search` with `mcp-server-emacs-tools-org-auto-id`
+      on) and never reflects unsaved edits in an open buffer — a pure
+      read, by construction incapable of writing anything. A path outside
+      the allowed roots, or a missing/unparseable file, is a per-file
+      error, never a reason to fail every other requested file.
+- `org-glean_similar` ("notes like this one") remains a plausible future
+  MCP tool; not built.
+- ~~`org-glean_suggest_location`~~ — superseded by `org-glean_outline`
+  above: the capture agent now fetches real outline structure and decides
+  placement itself, rather than org-glean guessing at a heuristic that
+  would only ever cover the cases it was written for.
 - Revisit headless (non-Emacs) agent access once MCP-through-Emacs proves
   insufficient in practice (see open questions).
 

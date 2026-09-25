@@ -134,12 +134,22 @@ defaults, and `org-knowledge/benchmarks/semantic-eval-v1.json` (a
 separate repository) for the regression set used to validate them.
 
 With `rhblind/emacs-mcp-server` installed, load `org-glean-mcp.el` to register
-the read-only `org-glean_search` tool. Set `org-glean-mcp-allowed-roots` to the
-caller-approved roots before exposing it to an agent. Results include a
-versioned result set, freshness state, provisional/stable target identity,
-match reason, score and margin. Completeness is `complete`, `truncated`, or
-`incomplete`; callers must not treat an incomplete empty result as a definitive
-miss.
+two read-only tools: `org-glean_search` and `org-glean_outline`. Set
+`org-glean-mcp-allowed-roots` to the caller-approved roots before exposing
+either to an agent. `org-glean_search` results include a versioned result
+set, freshness state, provisional/stable target identity, match reason,
+score and margin. Completeness is `complete`, `truncated`, or
+`incomplete`; callers must not treat an incomplete empty result as a
+definitive miss. `org-glean_search` accepts `property_filters` to
+constrain on any inherited Org property (e.g. `CAPTURE_POLICY`, but the
+mechanism has no built-in knowledge of that or any other property name —
+see API.md). `org-glean_outline` returns one or more files' whole
+heading structure (TODO state, priority, tags, org-id, inherited
+properties) in a single call, for an agent that has already used search
+to pick a destination file and needs to decide *where* in it to place
+something; org-glean makes no placement decision itself, and
+`org-glean_outline` never writes anything or mints an Org ID as a side
+effect, unlike `org-get-node`/`org-search` with auto-id enabled.
 
 Run synthetic-fixture tests with:
 
