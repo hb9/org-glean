@@ -30,6 +30,35 @@
   (make-directory (file-name-directory path) t)
   (with-temp-file path (insert text)))
 
+(defmacro org-glean-test--fake-backend (&rest body)
+  "Run BODY with a managed venv wired to the fake, dependency-free embedder.
+`org-glean-embed-available-p' passes because the expected files exist (a
+`python3' wrapper that execs the real interpreter, plus placeholder model
+files); the real embedding math never runs, only the fake bag-of-hashes
+embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
+  (declare (indent 0))
+  `(let* ((venv (make-temp-file "org-glean-venv-" t))
+          (org-glean-semantic-venv-dir venv)
+          (org-glean-semantic-model "e5-small")
+          (org-glean--embed-process nil)
+          (org-glean--embed-process-preset nil)
+          (org-glean--embed-responses nil)
+          (org-glean--embed-callbacks nil)
+          (org-glean--embed-response-buffer "")
+          (process-environment (cons "ORG_GLEAN_FAKE_EMBED=1" process-environment)))
+     (make-directory (expand-file-name "bin" venv) t)
+     (let ((python (expand-file-name "bin/python3" venv)))
+       (with-temp-file python
+         (insert (format "#!/bin/sh\nexec %s \"$@\"\n" (executable-find "python3"))))
+       (set-file-modes python #o755))
+     (let ((model-dir (org-glean--embed-model-dir "e5-small")))
+       (make-directory (expand-file-name "onnx" model-dir) t)
+       (with-temp-file (expand-file-name "tokenizer.json" model-dir) (insert "{}"))
+       (with-temp-file (expand-file-name "onnx/model.onnx" model-dir) (insert "")))
+     (unwind-protect (progn ,@body)
+       (org-glean-embed-stop)
+       (delete-directory venv t))))
+
 (ert-deftest org-glean-test-unchanged-reconcile-never-projects-or-replaces-source ()
   (org-glean-test--corpus
     (let ((path (expand-file-name "steady.org" root)))
@@ -758,6 +787,59 @@
       (should (eq t (alist-get 'truncated response)))
       (should (eq 'truncated (alist-get 'completeness response)))))
   )
+
+(ert-deftest org-glean-test-embed-available-p-requires-venv-and-model ()
+  (let* ((venv (make-temp-file "org-glean-venv-empty-" t))
+         (org-glean-semantic-venv-dir venv))
+    (unwind-protect
+        (should-not (org-glean-embed-available-p "e5-small"))
+      (delete-directory venv t))))
+
+(ert-deftest org-glean-test-embed-sync-round-trip-hello-and-embed ()
+  (org-glean-test--fake-backend
+    (let ((hello (org-glean--embed-request-sync "hello" nil)))
+      (should (equal "intfloat/multilingual-e5-small" (alist-get 'model_id hello)))
+      (should (= 384 (alist-get 'dimension hello))))
+    (let ((response (org-glean--embed-request-sync
+                     "embed" '((texts . ["one" "two"]) (kind . "passage")))))
+      (should (= 2 (length (alist-get 'vectors response)))))))
+
+(ert-deftest org-glean-test-embed-sync-reports-backend-error-without-crashing ()
+  (org-glean-test--fake-backend
+    (should-error (org-glean--embed-request-sync "not-a-real-op" nil))
+    ;; The process must still be usable after a bad request.
+    (should (org-glean--embed-request-sync "hello" nil))))
+
+(ert-deftest org-glean-test-embed-async-callback-receives-result ()
+  (org-glean-test--fake-backend
+    (let (received)
+      (org-glean--embed-request "hello" nil (lambda (response) (setq received response)))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (not received) (< (float-time) deadline))
+          (accept-process-output org-glean--embed-process 0.05)))
+      (should received)
+      (should (alist-get 'result received)))))
+
+(ert-deftest org-glean-test-embed-restarts-process-on-preset-change ()
+  (org-glean-test--fake-backend
+    (org-glean--embed-request-sync "hello" nil)
+    (let ((first (process-id org-glean--embed-process)))
+      ;; Requesting the same preset again must not spawn a new process.
+      (org-glean--embed-request-sync "hello" nil)
+      (should (equal first (process-id org-glean--embed-process))))))
+
+(ert-deftest org-glean-test-embed-process-exit-fails-pending-callback ()
+  (org-glean-test--fake-backend
+    (org-glean--embed-start-process "e5-small")
+    (let (received)
+      (push (cons 999 (lambda (response) (setq received response)))
+            org-glean--embed-callbacks)
+      (delete-process org-glean--embed-process)
+      (let ((deadline (+ (float-time) 2)))
+        (while (and (not received) (< (float-time) deadline))
+          (sit-for 0.05)))
+      (should received)
+      (should (alist-get 'error received)))))
 
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

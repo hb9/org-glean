@@ -104,6 +104,11 @@ consulted. See ROADMAP.md phase 1 for the preset table and backend."
 
 (defvar org-glean--pending-files nil)
 
+(defconst org-glean--package-directory
+  (file-name-directory (or load-file-name buffer-file-name default-directory))
+  "Directory containing the org-glean package files, for locating
+bundled scripts such as semantic/org_glean_embed.py.")
+
 (defun org-glean--digest (path)
   "Hash the literal saved bytes in PATH."
   (with-temp-buffer

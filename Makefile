@@ -1,5 +1,5 @@
 EMACS ?= emacs
-MODULES = org-glean-core.el org-glean-chunk.el org-glean-store.el org-glean-project.el \
+MODULES = org-glean-core.el org-glean-embed.el org-glean-chunk.el org-glean-store.el org-glean-project.el \
           org-glean-index.el org-glean-search.el org-glean-ui.el org-glean.el
 
 PYTHON ?= python3
