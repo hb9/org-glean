@@ -343,6 +343,26 @@ systematically rather than against 11 hand-picked queries, and whether
 `e5-base`/`bge-m3` change the picture enough to be worth their extra
 download size.
 
+### Semantic-search eval set (done)
+
+`org-knowledge/benchmarks/semantic-eval-v1.json` + `orgk benchmark semantic`
+(in the separate `org-knowledge` repository, not this one — see its
+`AGENTS.md` for why the eval set lives there): 12 known-good queries plus
+5 nonsense queries, grounded against a real corpus by direct read-only
+lookup rather than guessed titles. Each run loads a fresh `emacs --batch`
+process from this repository's current source — never the user's running
+daemon, which may hold a stale build — and reports hit@1/@5 for known-good
+queries and result volume for nonsense ones.
+
+First baseline run (`benchmarks/semantic-eval-v1-summary.md` in that repo):
+hit@5 12/12, hit@1 9/12, nonsense queries within a 5-hit budget 3/5. The two
+over-budget nonsense queries both had a legible, inspected cause (a
+"lessons" → learning/training association, and "patterns" matching an
+unrelated software-design-patterns document) rather than indicating a bug,
+confirming what the earlier offline measurement predicted before this run
+was ever made. `min_z=3.0`/`hub_lambda=0.5`/`min_pool_for_z=10` are treated
+as validated defaults for now; re-run the eval before changing them.
+
 ## Phase 3 — Agents
 
 - `org-glean_search` (evidence, coverage, freshness, granularity),
