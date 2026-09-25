@@ -74,6 +74,7 @@ PRESETS_PATH = Path(__file__).resolve().parent / "presets.json"
 DEFAULT_HUB_LAMBDA = 0.5
 DEFAULT_HUB_NEIGHBORS = 10
 DEFAULT_MIN_POOL_FOR_Z = 10
+DEFAULT_HUB_BLOCK_SIZE = 1024
 
 
 def load_presets() -> dict[str, dict[str, Any]]:
@@ -180,7 +181,8 @@ class OnnxEmbedder:
 
 class Backend:
     def __init__(self, preset_name: str, presets: dict[str, dict[str, Any]],
-                 model_dir: Path | None, fake: bool):
+                 model_dir: Path | None, fake: bool,
+                 hub_block_size: int = DEFAULT_HUB_BLOCK_SIZE):
         if preset_name not in presets:
             raise ValueError(f"unknown model preset: {preset_name}")
         self.preset_name = preset_name
@@ -199,6 +201,15 @@ class Backend:
         # while a real, thousands-of-chunks corpus gets vectorized scoring.
         self._np = getattr(self.embedder, "_np", None)
         self._matrix_cache: tuple[list[str], Any, list[float], list[float]] | None = None
+        # Block size for the hub-neighbour search below. Materializing the
+        # full n x n centered-vector similarity matrix at once is the
+        # simplest correct implementation, but its memory cost is O(n^2):
+        # about 1.6 GB of float32 at n=20000. Computing it in row-blocks
+        # instead bounds peak memory to O(hub_block_size * n) - about
+        # 80 MB at the same n=20000 with the default block size - for
+        # identical results, since it is the same computation, just done a
+        # slice of rows at a time rather than all at once.
+        self._hub_block_size = max(1, hub_block_size)
 
     def hello(self) -> dict[str, Any]:
         return {
@@ -260,11 +271,21 @@ class Backend:
             centered = centered / norms
             n = len(digests)
             if n > 1:
-                similarity = centered @ centered.T
-                np.fill_diagonal(similarity, -1.0)
                 neighbors = min(DEFAULT_HUB_NEIGHBORS, n - 1)
-                nearest = np.partition(similarity, n - neighbors, axis=1)[:, n - neighbors:]
-                hub = nearest.mean(axis=1).tolist()
+                hub = np.empty(n, dtype=np.float32)
+                block_size = self._hub_block_size
+                for start in range(0, n, block_size):
+                    end = min(start + block_size, n)
+                    # (end-start) x n similarity block, never the full n x n
+                    # matrix: this is the whole point of blocking.
+                    block_similarity = centered[start:end] @ centered.T
+                    rows_in_block = np.arange(end - start)
+                    block_similarity[rows_in_block, np.arange(start, end)] = -1.0
+                    nearest = np.partition(
+                        block_similarity, n - neighbors, axis=1
+                    )[:, n - neighbors:]
+                    hub[start:end] = nearest.mean(axis=1)
+                hub = hub.tolist()
             else:
                 hub = [0.0]
             mean = mean.tolist()
@@ -374,7 +395,8 @@ def main() -> int:
     model_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else None
     fake = os.environ.get("ORG_GLEAN_FAKE_EMBED") == "1"
     presets = load_presets()
-    backend = Backend(preset_name, presets, model_dir, fake)
+    hub_block_size = int(os.environ.get("ORG_GLEAN_HUB_BLOCK_SIZE", DEFAULT_HUB_BLOCK_SIZE))
+    backend = Backend(preset_name, presets, model_dir, fake, hub_block_size=hub_block_size)
 
     for line in sys.stdin:
         line = line.strip()

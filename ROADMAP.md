@@ -372,6 +372,37 @@ as validated defaults for now; re-run the eval before changing them.
 
 ## Phase 4 — Robustness and scale
 
+- [x] **Blocked hub-neighbour computation** (`semantic/org_glean_embed.py`,
+      `Backend._centered_matrix`). The hub correction (Phase 2, above)
+      needs each chunk's similarity to every other loaded chunk; computing
+      that as one full n x n matrix is simple but O(n^2) memory. Measured
+      at a synthetic n=20000 (20x the maintainer's real corpus): peak
+      process RSS 3512 MB materializing the full matrix at once vs. 667 MB
+      computing it in row-blocks of 1024 (also faster in this measurement:
+      3.77s vs. 5.56s, plausibly better cache locality, not a design goal
+      in itself). Results are identical to the full-matrix computation —
+      it is the same computation, just done a slice of rows at a time
+      instead of all at once — verified by three new tests comparing
+      block sizes 1 through 10000 against each other and against the
+      pure-Python fallback. `hub_block_size` (default 1024, override via
+      `ORG_GLEAN_HUB_BLOCK_SIZE`) is a pure memory/performance knob with
+      no effect on scoring.
+
+      **Re-scoped while investigating**: the plan going in also called for
+      incremental (not full-rebuild) hub updates on every `load()`, on the
+      assumption the O(n^2) recompute happened once per background
+      embedding batch. Checking the actual code path showed `load()`/
+      `unload()` only invalidate a cache; the expensive recomputation is
+      lazy and only actually runs on the next `search()` call. That makes
+      the real cost "once per user search after the corpus changed," not
+      "once per embedding batch" — meaningfully less frequent than
+      assumed, and not obviously worth the correctness risk of an
+      incremental top-k merge (mean drift on every load subtly invalidates
+      previously-computed neighbour lists, needing its own tested
+      staleness/rebuild policy). Blocking alone fixes the concrete,
+      quantified risk (memory); incremental updates are deferred until
+      recomputation latency itself is observed to be a problem, not
+      assumed to be one.
 - Incremental, time-sliced full reconciliation using the projection-config
   digest; a batch `emacs --batch` path (no Python) for first-build-only of
   very large corpora.

@@ -12,9 +12,12 @@ test:
 
 # Fake-embedder protocol tests: spawn the real org_glean_embed.py subprocess
 # with ORG_GLEAN_FAKE_EMBED=1, so this needs only the stdlib and pytest, no
-# onnxruntime/tokenizers/numpy install.
+# onnxruntime/tokenizers/numpy install. test_hub_block_size.py additionally
+# needs numpy (skips itself via pytest.importorskip if unavailable); it
+# imports the module directly to exercise the numpy-accelerated hub
+# computation without a real downloaded model.
 test-py:
-	$(PYTHON) -m pytest -q test/test_embed_backend.py test/test_download_script.py
+	$(PYTHON) -m pytest -q test/test_embed_backend.py test/test_download_script.py test/test_hub_block_size.py
 
 # Byte-compiles each module in isolation so cross-module require cycles and
 # missing requires surface immediately. org-glean-mcp.el is intentionally
