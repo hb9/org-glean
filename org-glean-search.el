@@ -136,17 +136,99 @@ When FUZZY is non-nil, add bounded fuzzy candidates."
        (equal (cdr requirement) actual)))
    requirements))
 
+(defun org-glean--property-lookup (properties key)
+  "Return KEY's value in generic PROPERTIES, case-insensitively, or nil.
+PROPERTIES is the alist stored on a result item's :properties field (an
+Org property drawer plus any inherited file-level #+PROPERTY lines,
+already merged by the projector — see `org-glean--properties' in
+org-glean-project.el). A property that was never set anywhere for this
+target is simply absent from this alist; there is no default-value
+fallback here for any property name, `CAPTURE_POLICY' included — any
+such interpretation is a caller's job, done by inspecting the dedicated
+`:capture-policy' result field, which is where the target's own default
+of \"eligible\" already lives (see the projector)."
+  (when (eq properties :null) (setq properties nil))
+  (cl-some (lambda (property)
+             (let ((name (if (symbolp (car property))
+                             (symbol-name (car property)) (car property))))
+               (when (equal (downcase name) (downcase key))
+                 (cdr property))))
+           properties))
+
+(defun org-glean--property-filter-match-p (properties filter)
+  "Return non-nil when PROPERTIES satisfies one property FILTER.
+FILTER is a plist: `(:key STRING :op OP :value STRING :values LIST)'. OP
+is one of `equals', `not-equals', `in', `not-in', `exists', `missing'
+(symbols). Value comparison is case-insensitive, matching every other
+string comparison in this file. A property that is absent from
+PROPERTIES simply has no value: it satisfies `not-equals'/`not-in' and
+`missing', and fails `equals'/`in'/`exists' — there is no implicit
+default value for any property name, including `CAPTURE_POLICY'; that is
+what makes this mechanism generic rather than a hard-coded special case."
+  (let* ((key (plist-get filter :key))
+         (op (plist-get filter :op))
+         (actual (org-glean--property-lookup properties key)))
+    (pcase op
+      ('exists (and actual t))
+      ('missing (not actual))
+      ('equals (and actual (equal (downcase actual)
+                                  (downcase (or (plist-get filter :value) "")))))
+      ('not-equals (not (and actual (equal (downcase actual)
+                                           (downcase (or (plist-get filter :value) ""))))))
+      ('in (and actual (member (downcase actual)
+                               (mapcar #'downcase (plist-get filter :values)))))
+      ('not-in (not (and actual (member (downcase actual)
+                                        (mapcar #'downcase (plist-get filter :values))))))
+      (_ (error "org-glean: unknown property filter op %S" op)))))
+
+(defun org-glean--property-filters-match-p (properties property-filters)
+  "Return non-nil when PROPERTIES satisfies every filter in PROPERTY-FILTERS."
+  (cl-every (lambda (filter) (org-glean--property-filter-match-p properties filter))
+            property-filters))
+
 (defun org-glean--filtered-out-p (item filters)
-  "Return non-nil if ITEM does not satisfy FILTERS."
-  (or (member (downcase (or (alist-get :capture-policy item) "eligible"))
-              (mapcar #'downcase (plist-get filters :exclude-property-values)))
-      (and (plist-get filters :max-heading-level)
+  "Return non-nil if ITEM does not satisfy FILTERS.
+FILTERS' `:property-filters' is the general mechanism for constraining on
+any inherited property (see `org-glean--property-filters-match-p'); it
+has no special knowledge of any particular property name. `:exclude-
+property-values' and `:property-equals' remain accepted for callers who
+have not moved to `:property-filters' yet, but are deprecated — see
+`org-glean--eligible-p''s docstring for what they translate to. This
+file has no hard-coded property name anywhere else."
+  (or (and (plist-get filters :max-heading-level)
            (equal (alist-get :kind item) "heading")
            (> (or (alist-get :level item) 0) (plist-get filters :max-heading-level)))
       (member (downcase (or (alist-get :title item) ""))
               (mapcar #'downcase (plist-get filters :exclude-titles)))
-       (not (org-glean--properties-match-p
-             (alist-get :properties item) (plist-get filters :property-equals)))))
+      (not (org-glean--properties-match-p
+            (alist-get :properties item) (plist-get filters :property-equals)))
+      (not (org-glean--property-filters-match-p
+            (alist-get :properties item) (plist-get filters :property-filters)))))
+
+(defun org-glean--normalize-filters (filters)
+  "Translate FILTERS' deprecated keys into `:property-filters' entries.
+
+`:exclude-property-values VALUES' translates to a `not-in' filter on
+`CAPTURE_POLICY' — the only property it was ever able to constrain — so
+existing callers of the Elisp API and the MCP `exclude_property_values'
+parameter keep working unchanged. `:property-key'/`:property-value'
+translate to a single `equals' filter on whatever property name the
+caller gave. New callers should use `:property-filters' directly instead
+of either; this is the one place any of the old names is still
+mentioned, everywhere else in this file the filtering mechanism has no
+built-in knowledge of any particular property."
+  (let ((exclude-values (plist-get filters :exclude-property-values))
+        (property-key (plist-get filters :property-key))
+        (property-value (plist-get filters :property-value))
+        (extra nil))
+    (when exclude-values
+      (push (list :key "CAPTURE_POLICY" :op 'not-in :values exclude-values) extra))
+    (when (and property-key property-value)
+      (push (list :key property-key :op 'equals :value property-value) extra))
+    (if extra
+        (plist-put (copy-sequence filters) :property-filters
+                   (append (plist-get filters :property-filters) extra))
+      filters)))
 
 (defun org-glean--eligible-p (item filters)
   "Return non-nil when ITEM passes FILTERS, including allowed-root scope."
@@ -415,6 +497,7 @@ prevents semantic or fuzzy candidates from being considered; results are
 then merged by target and ranked by weighted reciprocal-rank fusion (see
 `org-glean--fusion-merge' and `org-glean--relevance-before-p')."
   (let* ((db (org-glean--db))
+         (filters (org-glean--normalize-filters filters))
          (limit (max 1 (min 100 (or limit org-glean-search-limit))))
          (pool (max limit org-glean-fusion-pool-size))
          (budget (max 1 org-glean-search-work-budget))

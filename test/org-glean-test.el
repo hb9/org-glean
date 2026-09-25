@@ -409,6 +409,133 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (should (= 1 (alist-get 'candidate-count red)))
       (should (= 0 (alist-get 'candidate-count blue))))))
 
+(ert-deftest org-glean-test-property-filters-op-equals-and-not-equals ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "* Alpha\n:PROPERTIES:\n:STATUS: active\n:END:\nfiltertermalpha\n* Beta\n:PROPERTIES:\n:STATUS: retired\n:END:\nfiltertermbeta\n")
+    (org-glean-reconcile)
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "filterterm" 10 nil
+                             '(:property-filters ((:key "STATUS" :op equals :value "active")))))))
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "filterterm" 10 nil
+                             '(:property-filters ((:key "STATUS" :op not-equals :value "active")))))))))
+
+(ert-deftest org-glean-test-property-filters-op-in-and-not-in-are-case-insensitive ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "* Gamma\n:PROPERTIES:\n:KIND: Draft\n:END:\ninopstermgamma\n* Delta\n:PROPERTIES:\n:KIND: final\n:END:\ninopstermdelta\n")
+    (org-glean-reconcile)
+    ;; Both the filter's key and its property's own key/value casing differ
+    ;; from what is stored -- matching is documented as case-insensitive.
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "inopsterm" 10 nil
+                             '(:property-filters ((:key "kind" :op in :values ("DRAFT" "review"))))))))
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "inopsterm" 10 nil
+                             '(:property-filters ((:key "kind" :op not-in :values ("DRAFT" "review"))))))))))
+
+(ert-deftest org-glean-test-property-filters-op-exists-and-missing ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "* HasIt\n:PROPERTIES:\n:OWNER: alice\n:END:\nexiststermhasit\n* Lacks\nexiststermlacks\n")
+    (org-glean-reconcile)
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "existsterm" 10 nil
+                             '(:property-filters ((:key "OWNER" :op exists)))))))
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "existsterm" 10 nil
+                             '(:property-filters ((:key "OWNER" :op missing)))))))))
+
+(ert-deftest org-glean-test-property-filters-are-anded-together ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     (concat "* Both\n:PROPERTIES:\n:A: yes\n:B: yes\n:END:\nandtermboth\n"
+             "* OnlyA\n:PROPERTIES:\n:A: yes\n:END:\nandtermonlya\n"))
+    (org-glean-reconcile)
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "andterm" 10 nil
+                             '(:property-filters ((:key "A" :op equals :value "yes")
+                                                   (:key "B" :op equals :value "yes")))))))))
+
+(ert-deftest org-glean-test-property-filters-has-no-implicit-default-value ()
+  ;; The generic mechanism has no built-in knowledge of any property,
+  ;; CAPTURE_POLICY included: a property that was never set anywhere for a
+  ;; target is simply absent, never silently treated as some default value.
+  ;; This is what distinguishes it from the deprecated :exclude-property-
+  ;; values path this same case is compared against below.
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root)
+                           "* Undecorated\nnodefaulttermbare\n")
+    (org-glean-reconcile)
+    (should (= 0 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "nodefaulttermbare" 10 nil
+                             '(:property-filters ((:key "CAPTURE_POLICY" :op equals :value "eligible")))))))
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "nodefaulttermbare" 10 nil
+                             '(:property-filters ((:key "CAPTURE_POLICY" :op missing)))))))))
+
+(ert-deftest org-glean-test-property-filters-applied-before-result-limit ()
+  ;; Mirrors org-glean-test-search-pages-past-excluded-prefix-before-filling-
+  ;; limit, using the new mechanism instead of the deprecated one, to prove
+  ;; filtering happens before LIMIT truncation for :property-filters too, not
+  ;; only for its deprecated predecessor.
+  (org-glean-test--corpus
+    (dotimes (n 105)
+      (org-glean-test--write
+       (expand-file-name (format "a%03d.org" n) root)
+       "#+PROPERTY: CAPTURE_POLICY none\n* Hidden match\nsharedneedletwo\n"))
+    (org-glean-test--write (expand-file-name "z-eligible.org" root)
+                           "* Eligible destination\nsharedneedletwo\n")
+    (let ((org-glean-search-page-size 20))
+      (org-glean-reconcile)
+      (let* ((response (org-glean-search-api
+                        "sharedneedletwo" 1 nil
+                        '(:property-filters ((:key "CAPTURE_POLICY" :op not-in :values ("none"))))))
+             (results (alist-get 'results response)))
+        (should (= 1 (length results)))
+        (should (equal "Eligible destination" (alist-get :title (aref results 0))))))))
+
+(ert-deftest org-glean-test-deprecated-exclude-property-values-still-works ()
+  ;; Regression test for the backward-compatibility shim
+  ;; (org-glean--normalize-filters): existing callers passing
+  ;; :exclude-property-values directly (not through MCP) must see identical
+  ;; behavior to before property_filters existed.
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "#+PROPERTY: CAPTURE_POLICY none\n* Hidden\nlegacyexcludeterm\n")
+    (org-glean-test--write (expand-file-name "z.org" root) "* Visible\nlegacyexcludeterm\n")
+    (org-glean-reconcile)
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "legacyexcludeterm" 10 nil
+                             '(:exclude-property-values ("none"))))))))
+
+(ert-deftest org-glean-test-deprecated-property-key-value-still-works ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "note.org" root)
+     "* Match\n:PROPERTIES:\n:TEAM: platform\n:END:\nlegacykeyvalueterm\n* Other\n:PROPERTIES:\n:TEAM: apps\n:END:\nlegacykeyvalueterm\n")
+    (org-glean-reconcile)
+    (should (= 1 (alist-get 'candidate-count
+                            (org-glean-search-api
+                             "legacykeyvalueterm" 10 nil
+                             '(:property-key "TEAM" :property-value "platform")))))))
+
 (ert-deftest org-glean-test-failed-replacement-preserves-previous ()
   (org-glean-test--corpus
     (let ((path (expand-file-name "note.org" root)))
@@ -741,6 +868,39 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (equal "sources-checked-current" (alist-get 'freshness decoded)))
         (should (= 1 (length (alist-get 'results decoded))))
         (should (equal "heading" (alist-get 'kind (aref (alist-get 'results decoded) 0))))))))
+
+(ert-deftest org-glean-test-mcp-property-filters-param-is-generic ()
+  (org-glean-test--corpus
+    (let* ((org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write
+       (expand-file-name "note.org" root)
+       "* Match\n:PROPERTIES:\n:TEAM: platform\n:END:\nmcppropterm\n* Other\n:PROPERTIES:\n:TEAM: apps\n:END:\nmcppropterm\n")
+      (org-glean-reconcile)
+      ;; property_filters arrives from JSON as an alist per entry, exactly
+      ;; as mcp-server-tools would parse it -- this is not routed through
+      ;; org-glean-search-api's Elisp keyword-plist convention directly.
+      (let* ((json (org-glean-mcp--handler
+                    '((query . "mcppropterm")
+                      (property_filters . (((key . "TEAM") (op . "equals") (value . "platform")))))))
+             (decoded (json-parse-string json :object-type 'alist)))
+        (should (= 1 (length (alist-get 'results decoded))))
+        (should (equal "Match" (alist-get 'title (aref (alist-get 'results decoded) 0))))))))
+
+(ert-deftest org-glean-test-mcp-property-filters-in-op-with-values-array ()
+  (org-glean-test--corpus
+    (let* ((org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write
+       (expand-file-name "note.org" root)
+       "#+PROPERTY: CAPTURE_POLICY none\n* Hidden\nmcpinopterm\n")
+      (org-glean-test--write (expand-file-name "z.org" root) "* Visible\nmcpinopterm\n")
+      (org-glean-reconcile)
+      (let* ((json (org-glean-mcp--handler
+                    '((query . "mcpinopterm")
+                      (property_filters
+                       . (((key . "CAPTURE_POLICY") (op . "not_in") (values . ["none"])))))))
+             (decoded (json-parse-string json :object-type 'alist)))
+        (should (= 1 (length (alist-get 'results decoded))))
+        (should (equal "Visible" (alist-get 'title (aref (alist-get 'results decoded) 0))))))))
 
 (ert-deftest org-glean-test-results-buffer-renders-and-visits-rows ()
   (org-glean-test--corpus

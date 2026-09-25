@@ -90,8 +90,8 @@ otherwise-unchanged passage. `org-glean--replace` rewrites a source's
  :purpose SYMBOL-OR-NIL)
 ```
 
-Generic filters include `:allowed-roots`, `:exclude-property-values`,
-`:property-equals`, `:max-heading-level`, and `:exclude-titles`. They are
+Generic filters include `:allowed-roots`, `:property-filters`,
+`:max-heading-level`, and `:exclude-titles`. They are
 applied before the caller-visible result limit for every mode, including
 `semantic`. Requesting `semantic` when `org-glean-semantic-provider` is nil,
 or when it is configured but the active model is not installed
@@ -286,11 +286,35 @@ shorthand for adding `fuzzy`.
 
 ```elisp
 (:allowed-roots DIRECTORY-LIST
- :exclude-property-values STRING-LIST
- :property-equals ((PROPERTY . VALUE) ...)
+ :property-filters ((:key STRING :op OP :value STRING :values STRING-LIST) ...)
  :max-heading-level POSITIVE-INTEGER
  :exclude-titles STRING-LIST)
 ```
+
+`:property-filters` constrains on any inherited Org property (a heading's
+own property drawer, or a file-level `#+PROPERTY` line it inherits from) —
+this mechanism has no built-in knowledge of any particular property name,
+`CAPTURE_POLICY` included. Every entry must match (they are ANDed
+together). `OP` is one of `equals`, `not-equals`, `in`, `not-in`,
+`exists`, `missing`; `:value` is used by `equals`/`not-equals`, `:values`
+by `in`/`not-in`. A property that was never set anywhere on a target is
+simply absent — it satisfies `not-equals`/`not-in`/`missing` and fails
+`equals`/`in`/`exists`, with no implicit default value substituted for
+any property. This is why, for example, filtering out `CAPTURE_POLICY`
+values of `"none"` (`:property-filters ((:key "CAPTURE_POLICY" :op not-in
+:values ("none")))`) also keeps a target that never set the property at
+all: absent is not `"none"`.
+
+`:exclude-property-values`, `:property-key`/`:property-value` and
+`:property-equals` are all still accepted (the first two are deprecated
+aliases translated into `:property-filters` entries automatically —
+`org-glean--normalize-filters` — specifically, `:exclude-property-values`
+becomes a `not-in` filter on `CAPTURE_POLICY`, since that was the only
+property it was ever able to constrain; `:property-equals` is a separate,
+still-current mechanism for several exact key/value requirements at once:
+`((PROPERTY . VALUE) ...)`, all required). New callers wanting anything
+other than plain equality on several properties at once should use
+`:property-filters` directly.
 
 The optional `:allowed-roots` value is fail-closed when explicitly supplied as
 an empty list. When omitted from a local Lisp call, configured `org-glean-roots`
