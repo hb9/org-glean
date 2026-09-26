@@ -954,6 +954,27 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
         (should (= 1 (length (alist-get 'results decoded))))
         (should (equal "heading" (alist-get 'kind (aref (alist-get 'results decoded) 0))))))))
 
+(ert-deftest org-glean-test-mcp-empty-string-property-key-value-are-ignored ()
+  ;; Regression test: many MCP clients (including Pi's tool bridge) send
+  ;; every optional string argument as "" rather than omitting it. Since
+  ;; property_key/property_value are deprecated but still-supported
+  ;; arguments, an empty string for both must behave exactly like omitting
+  ;; them -- not like an active filter for a property literally named "".
+  ;; Before the fix, `(and "" "")' is non-nil in Elisp, so this silently
+  ;; zeroed out every result.
+  (org-glean-test--corpus
+    (let* ((org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write
+       (expand-file-name "note.org" root) "* Match\nemptypropterm\n")
+      (org-glean-reconcile)
+      (let* ((json (org-glean-mcp--handler
+                    '((query . "emptypropterm")
+                      (property_key . "")
+                      (property_value . ""))))
+             (decoded (json-parse-string json :object-type 'alist)))
+        (should (= 1 (length (alist-get 'results decoded))))
+        (should (equal "Match" (alist-get 'title (aref (alist-get 'results decoded) 0))))))))
+
 (ert-deftest org-glean-test-mcp-property-filters-param-is-generic ()
   (org-glean-test--corpus
     (let* ((org-glean-mcp-allowed-roots (list root)))

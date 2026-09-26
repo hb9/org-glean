@@ -12,6 +12,7 @@
 (require 'mcp-server-tools)
 (require 'cl-lib)
 (require 'json)
+(require 'subr-x)
 
 (defgroup org-glean-mcp nil "MCP adapter for Org Glean." :group 'org-glean)
 
@@ -45,6 +46,12 @@ to any value."
              (exclude-titles (append (alist-get 'exclude_titles args) nil))
              (property-key (alist-get 'property_key args))
              (property-value (alist-get 'property_value args))
+             (property-key (and (stringp property-key)
+                                 (not (string-empty-p property-key))
+                                 property-key))
+             (property-value (and (stringp property-value)
+                                   (not (string-empty-p property-value))
+                                   property-value))
              (property-filters (mapcar #'org-glean-mcp--property-filter-from-args
                                        (append (alist-get 'property_filters args) nil)))
               (modes (let ((requested (mapcar #'intern (append (alist-get 'modes args) nil))))
