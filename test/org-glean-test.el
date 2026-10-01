@@ -1772,5 +1772,156 @@ still be reported."
       (org-glean-semantic-toggle)
       (should (timerp org-glean--semantic-queue-timer)))))
 
+(ert-deftest org-glean-test-eligibility-project-token-ignores-trailing-qualifiers ()
+  (should (equal "flat" (org-glean--eligibility-project-token
+                         "/x/20260913T205618--flat-finckensteinallee-89__pr_flat.org")))
+  (should (equal "flat" (org-glean--eligibility-project-token
+                         "/x/20260428T210349--flat-aquisition-contract__pr_flat_legal.org")))
+  (should (null (org-glean--eligibility-project-token "/x/20260913T205618--no-tags.org"))))
+
+(ert-deftest org-glean-test-eligibility-active-main-is-preferred ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--main__pr_proj.org" root)
+     "#+property:   KIND project\n#+property:   STATUS active\n#+property:   ROLE main\n\n* Task\n")
+    (let* ((main (expand-file-name "20260101T000000--main__pr_proj.org" root))
+           (result (org-glean-eligibility main))
+           (item (car (alist-get :classifications result))))
+      (should (eq 'preferred (alist-get :result item)))
+      (should (string-match-p "ROLE is main, STATUS is active" (alist-get :reason item))))))
+
+(ert-deftest org-glean-test-eligibility-side-file-of-active-project-is-eligible ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--main__pr_proj.org" root)
+     "#+property:   KIND project\n#+property:   STATUS active\n#+property:   ROLE main\n\n* Task\n")
+    (org-glean-test--write
+     (expand-file-name "20260101T000001--side__pr_proj.org" root)
+     "#+property:   KIND project\n#+property:   ROLE side\n\n* Task\n")
+    (let* ((side (expand-file-name "20260101T000001--side__pr_proj.org" root))
+           (result (org-glean-eligibility side))
+           (item (car (alist-get :classifications result))))
+      (should (eq 'eligible (alist-get :result item)))
+      (should (string-match-p "main__pr_proj\\.org is not closed" (alist-get :reason item))))))
+
+(ert-deftest org-glean-test-eligibility-closed-main-is-none ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--main__pr_proj.org" root)
+     "#+property:   KIND project\n#+property:   STATUS closed\n#+property:   ROLE main\n\n* Task\n")
+    (let* ((main (expand-file-name "20260101T000000--main__pr_proj.org" root))
+           (result (org-glean-eligibility main))
+           (item (car (alist-get :classifications result))))
+      (should (eq 'none (alist-get :result item)))
+      (should (string-match-p "STATUS is closed" (alist-get :reason item))))))
+
+(ert-deftest org-glean-test-eligibility-side-file-of-closed-project-is-none ()
+  "The one case a single file's own properties cannot answer: a side
+file deliberately carries no STATUS of its own (§7.3) and must inherit
+it from its project's main file, found by the shared pr_<token>."
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--main__pr_proj.org" root)
+     "#+property:   KIND project\n#+property:   STATUS closed\n#+property:   ROLE main\n\n* Task\n")
+    (org-glean-test--write
+     (expand-file-name "20260101T000001--side__pr_proj.org" root)
+     "#+property:   KIND project\n#+property:   ROLE side\n\n* Task\n")
+    (let* ((side (expand-file-name "20260101T000001--side__pr_proj.org" root))
+           (result (org-glean-eligibility side))
+           (item (car (alist-get :classifications result))))
+      (should (eq 'none (alist-get :result item)))
+      (should (string-match-p "its main file .*main__pr_proj\\.org has STATUS closed"
+                              (alist-get :reason item))))))
+
+(ert-deftest org-glean-test-eligibility-side-file-with-no-main-is-eligible-not-guessed ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000001--side__pr_lonely.org" root)
+     "#+property:   KIND project\n#+property:   ROLE side\n\n* Task\n")
+    (let* ((side (expand-file-name "20260101T000001--side__pr_lonely.org" root))
+           (result (org-glean-eligibility side))
+           (item (car (alist-get :classifications result))))
+      (should (eq 'eligible (alist-get :result item)))
+      (should (string-match-p "no ROLE main file found" (alist-get :reason item))))))
+
+(ert-deftest org-glean-test-eligibility-area-active-is-preferred-closed-is-none ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--home__area_home.org" root)
+     "#+property:   KIND area\n#+property:   STATUS active\n\n* Task\n")
+    (org-glean-test--write
+     (expand-file-name "20260101T000001--done__area_other.org" root)
+     "#+property:   KIND area\n#+property:   STATUS closed\n\n* Task\n")
+    (let ((result (org-glean-eligibility
+                   (list (expand-file-name "20260101T000000--home__area_home.org" root)
+                         (expand-file-name "20260101T000001--done__area_other.org" root)))))
+      (should (eq 'preferred (alist-get :result (nth 0 (alist-get :classifications result)))))
+      (should (eq 'none (alist-get :result (nth 1 (alist-get :classifications result))))))))
+
+(ert-deftest org-glean-test-eligibility-log-archive-inbox-are-none ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "20260101T000000--hours__log.org" root)
+                           "#+property:   KIND log\n\n* Entry\n")
+    (org-glean-test--write (expand-file-name "20260101T000001--old-tasks.org" root)
+                           "#+property:   KIND archive\n\n* Entry\n")
+    (org-glean-test--write (expand-file-name "20260101T000002--inbox.org" root)
+                           "#+property:   KIND inbox\n\n* Entry\n")
+    (let* ((files (list (expand-file-name "20260101T000000--hours__log.org" root)
+                        (expand-file-name "20260101T000001--old-tasks.org" root)
+                        (expand-file-name "20260101T000002--inbox.org" root)))
+           (result (org-glean-eligibility files))
+           (items (alist-get :classifications result)))
+      (should (cl-every (lambda (item) (eq 'none (alist-get :result item))) items)))))
+
+(ert-deftest org-glean-test-eligibility-unset-kind-is-eligible-unchanged-default ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "20260101T000000--plain.org" root)
+                           "* Some note\n")
+    (let* ((result (org-glean-eligibility (expand-file-name "20260101T000000--plain.org" root)))
+           (item (car (alist-get :classifications result))))
+      (should (eq 'eligible (alist-get :result item)))
+      (should (string-match-p "no KIND set" (alist-get :reason item))))))
+
+(ert-deftest org-glean-test-eligibility-reports-per-file-error-without-failing-others ()
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "20260101T000000--plain.org" root)
+                           "* Some note\n")
+    (let* ((missing (expand-file-name "does-not-exist.org" root))
+           (present (expand-file-name "20260101T000000--plain.org" root))
+           (result (org-glean-eligibility (list missing present))))
+      (should (= 1 (length (alist-get :classifications result))))
+      (should (= 1 (length (alist-get :errors result))))
+      (should (equal missing (alist-get :path (car (alist-get :errors result))))))))
+
+(ert-deftest org-glean-test-mcp-eligibility-rejects-path-outside-allowed-roots ()
+  (org-glean-test--corpus
+    (let* ((allowed (expand-file-name "allowed" root))
+           (other (expand-file-name "other" root))
+           (org-glean-roots (list (list "all" root nil nil)))
+           (org-glean-mcp-allowed-roots (list allowed)))
+      (org-glean-test--write (expand-file-name "a.org" other) "* Outside\n")
+      (let* ((json (org-glean-mcp--eligibility-handler
+                    `((file . ,(expand-file-name "a.org" other)))))
+             (decoded (json-parse-string json :object-type 'alist)))
+        (should (= 0 (length (alist-get 'classifications decoded))))
+        (should (= 1 (length (alist-get 'errors decoded))))
+        (should (string-match-p "outside every allowed root"
+                                (alist-get 'message (aref (alist-get 'errors decoded) 0))))))))
+
+(ert-deftest org-glean-test-mcp-eligibility-accepts-several-files ()
+  (org-glean-test--corpus
+    (let* ((path-a (expand-file-name "20260101T000000--a__area_home.org" root))
+           (path-b (expand-file-name "20260101T000001--b.org" root))
+           (org-glean-mcp-allowed-roots (list root)))
+      (org-glean-test--write path-a "#+property:   KIND area\n#+property:   STATUS active\n\n* One\n")
+      (org-glean-test--write path-b "* Two\n")
+      (let* ((json (org-glean-mcp--eligibility-handler
+                    `((files . [,path-a ,path-b]))))
+             (decoded (json-parse-string json :object-type 'alist))
+             (classifications (alist-get 'classifications decoded)))
+        (should (= 2 (length classifications)))
+        (should (equal "preferred" (alist-get 'result (aref classifications 0))))
+        (should (equal "eligible" (alist-get 'result (aref classifications 1))))))))
+
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here

@@ -401,8 +401,28 @@ as validated defaults for now; re-run the eval before changing them.
       `org-get-node`/`org-search` with `mcp-server-emacs-tools-org-auto-id`
       on) and never reflects unsaved edits in an open buffer — a pure
       read, by construction incapable of writing anything. A path outside
-      the allowed roots, or a missing/unparseable file, is a per-file
+      the       allowed roots, or a missing/unparseable file, is a per-file
       error, never a reason to fail every other requested file.
+- [x] **`org-glean_eligibility`** (new `org-glean-eligibility.el` + MCP
+      tool): classifies one or more files as `preferred`, `eligible` or
+      `none` as a capture destination, read from the KIND/STATUS/ROLE
+      file-header convention (org-knowledge's capture-workflow note
+      §6.3/§6.5/§7) rather than a standalone `CAPTURE_POLICY` value. This
+      reverses that note's original §6.5, which said the rule belonged in
+      the capture agent or an `orgk` helper, not in org-glean — written
+      before the agent became MCP-only with no shell access. The one
+      thing a single file's own properties cannot answer is a side file's
+      status (deliberately unset, per §7.3, inherited from its project's
+      main file): resolving that needs a cross-file lookup by the shared
+      `pr_<token>` in the filename, scoped to the same allowed root —
+      this is the one piece of real work the tool adds over what
+      `org-glean_outline` already returns per file. A side file whose
+      main file cannot be resolved, or resolves ambiguously (more than
+      one `ROLE main` sharing the token), is conservatively `eligible`
+      rather than guessed at either way, with the reason saying so. Reads
+      every file fresh from disk, same as `org-glean_outline`: no live
+      buffer, no auto-id side effect, never writes anything.
+
 - `org-glean_similar` ("notes like this one") remains a plausible future
   MCP tool; not built.
 - ~~`org-glean_suggest_location`~~ — superseded by `org-glean_outline`
