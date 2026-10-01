@@ -1154,6 +1154,36 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       (should (eq t (alist-get 'truncated response)))
       (should (eq 'incomplete (alist-get 'degraded response))))))
 
+(ert-deftest org-glean-test-fuzzy-own-cap-alone-is-not-incomplete ()
+  "Hitting fuzzy's own candidate cap, with plenty of shared budget left,
+must not mark the whole search `incomplete' — that over-fired on nearly
+every non-trivial query (see capture-workflow note §5)."
+  (org-glean-test--corpus
+    (dotimes (n 10)
+      (org-glean-test--write
+       (expand-file-name (format "junk%02d.org" n) root)
+       (format "* needleterm%s\njunk\n" (make-string 100 ?x))))
+    (org-glean-reconcile)
+    (let* ((org-glean-fuzzy-candidate-limit 3)
+           (org-glean-search-work-budget 2000)
+           (response (org-glean-search-api "needleterm" 5 nil nil '(fuzzy))))
+      (should (not (eq 'incomplete (alist-get 'completeness response)))))))
+
+(ert-deftest org-glean-test-fuzzy-reports-incomplete-when-shared-budget-is-the-cap ()
+  "When the shared work budget itself is smaller than fuzzy's own
+candidate cap, running out of it is genuine incompleteness and must
+still be reported."
+  (org-glean-test--corpus
+    (dotimes (n 10)
+      (org-glean-test--write
+       (expand-file-name (format "junk%02d.org" n) root)
+       (format "* needleterm%s\njunk\n" (make-string 100 ?x))))
+    (org-glean-reconcile)
+    (let* ((org-glean-fuzzy-candidate-limit 500)
+           (org-glean-search-work-budget 3)
+           (response (org-glean-search-api "needleterm" 5 nil nil '(fuzzy))))
+      (should (eq 'incomplete (alist-get 'completeness response))))))
+
 (ert-deftest org-glean-test-result-limit-reports-truncation ()
   (org-glean-test--corpus
     (dotimes (n 4)

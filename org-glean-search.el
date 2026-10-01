@@ -317,8 +317,18 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
                                 item))
                             (cl-subseq selected 0 (min limit (length selected))))))
       (setq extra (> (length scored) (length matches)))
+      ;; Hitting scan-cap is "incomplete" only when the shared work BUDGET
+      ;; was itself the limiting factor (budget <= org-glean-fuzzy-candidate-limit).
+      ;; In the common case BUDGET is far larger than the fuzzy-specific
+      ;; candidate cap, so scan-cap = org-glean-fuzzy-candidate-limit; fuzzy
+      ;; stopping there reflects its own bounded, typo-tolerant design (an
+      ;; OR over trigrams casts a wide net, so this cap is reached on nearly
+      ;; every non-trivial query) and says nothing about whether the shared
+      ;; budget had room to look further. Conflating the two made
+      ;; `completeness' report `incomplete' on almost every search.
       (list matches examined
-            (and (not done) (not extra) (>= examined scan-cap))
+            (and (not done) (not extra) (>= examined scan-cap)
+                 (<= budget org-glean-fuzzy-candidate-limit))
             extra))))
 
 (defun org-glean--set-freshness (item)
