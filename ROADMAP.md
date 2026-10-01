@@ -420,8 +420,18 @@ as validated defaults for now; re-run the eval before changing them.
       main file cannot be resolved, or resolves ambiguously (more than
       one `ROLE main` sharing the token), is conservatively `eligible`
       rather than guessed at either way, with the reason saying so. Reads
-      every file fresh from disk, same as `org-glean_outline`: no live
-      buffer, no auto-id side effect, never writes anything.
+       every file fresh from disk, same as `org-glean_outline`: no live
+       buffer, no auto-id side effect, never writes anything.
+- [x] **`ALIASES` searchable via `exact` mode** (`org-glean-search.el`):
+      the same file-header convention's `ALIASES` property is now one more
+      exact-match surface alongside title, so "OD DMS" finds aistore even
+      though neither word appears in its title. Its own bounded candidate
+      pool, reported under the same `exact` mode key as the title lookup
+      (`org-glean--fusion-merge` already supports several pools
+      contributing to one mode). Pre-filtered in SQL to files whose
+      properties mention `ALIASES` at all, so cost stays proportional to
+      actual usage rather than scanning every file on every search.
+
 
 - `org-glean_similar` ("notes like this one") remains a plausible future
   MCP tool; not built.

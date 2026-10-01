@@ -282,6 +282,23 @@ MODES, when non-nil, is a list among `exact`, `lexical`, `fuzzy` and
 `semantic`; it defaults to `(exact lexical)`, with FUZZY as a legacy
 shorthand for adding `fuzzy`.
 
+`exact` checks two things, both reported under the same `exact` mode in
+a result's `:modes`: a file-level or heading-level target's own title,
+and — new, file-level only — a file's `ALIASES` property (the
+KIND/STATUS/ROLE/ALIASES convention, capture-workflow note §7.1), split
+on whitespace except for a double-quoted run, which counts as one alias
+(`split-string-and-unquote`): `ALIASES aistore ai.store OD DMS` makes
+"OD" and "DMS" each a separate exact-match alias for that file, even
+though neither appears anywhere in its title, while `ALIASES tales "ai
+story"` keeps the quoted phrase as one alias rather than splitting it
+into "ai" and "story". Matching is exact and case-insensitive, never a
+substring or fuzzy match — that is what `fuzzy` mode is for. This is
+file-level only: a heading itself has no `ALIASES` of its own. The
+candidate pool is pre-filtered in SQL to files whose `properties` blob
+mentions `ALIASES` at all, so this stays proportional to actual
+`ALIASES` usage (a handful of files in practice) rather than scanning
+every file-level target on every search.
+
 `org-glean-search-api` accepts these filter plist keys:
 
 ```elisp

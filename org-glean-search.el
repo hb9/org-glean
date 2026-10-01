@@ -10,6 +10,7 @@
 
 (require 'org-glean-core)
 (require 'org-glean-store)
+(require 'org-glean-project)
 (require 'org-glean-semantic)
 (require 'sqlite)
 (require 'cl-lib)
@@ -261,6 +262,60 @@ Return (ITEMS EXAMINED INCOMPLETE EXTRA)."
               (if (>= (length items) limit)
                   (setq extra t)
                 (puthash (alist-get :key item) t seen)
+                (push item items)))))))
+    (list (nreverse items) examined
+          (and (not done) (not extra) (>= examined budget)
+               (<= (length items) limit))
+          extra)))
+
+(defun org-glean--parse-aliases (value)
+  "Parse an ALIASES property VALUE into a list of alias strings.
+Space-separated, except a double-quoted run counts as one alias, e.g.
+\"aistore ai.store OD DMS\" -> (\"aistore\" \"ai.store\" \"OD\" \"DMS\"),
+each a separate alias, while \"tales \\\"ai story\\\"\" -> (\"tales\"
+\"ai story\"), the quoted phrase kept as one."
+  (and value (not (string-empty-p (string-trim value)))
+       (ignore-errors (split-string-and-unquote value))))
+
+(defun org-glean--collect-alias (db query filters limit budget page-size seen)
+  "Collect file-level targets whose ALIASES property has QUERY as one
+alias, exactly (case-insensitively), not a substring. A file's ALIASES
+are a first-draft convenience for exact lookups like \"OD DMS\" finding
+aistore (capture-workflow note §7.1); this is not fuzzy or partial
+matching — see `org-glean--collect-fuzzy' for that."
+  (let* ((needle (downcase (string-trim query)))
+         ;; properties LIKE '%ALIASES%' is a cheap pre-filter, not the
+         ;; match itself: it only narrows to files whose header sets
+         ;; ALIASES at all (a handful in practice, out of the whole
+         ;; corpus), before the real per-alias comparison below. Without
+         ;; it this would scan every file-kind row on every search,
+         ;; inflating `work-examined' in proportion to total corpus size
+         ;; rather than actual ALIASES usage.
+         (sql "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE kind='file' AND properties LIKE '%ALIASES%' ORDER BY path LIMIT ? OFFSET ?")
+         (offset 0) (examined 0) (done nil) (items nil) (extra nil))
+    (while (and (not done) (< examined budget) (not extra)
+                (< (length items) (1+ limit)))
+      (let* ((size (min page-size (- budget examined)))
+             (rows (org-glean--results
+                    (sqlite-select db sql (vector size offset)))))
+        (setq examined (+ examined (length rows))
+              offset (+ offset (length rows))
+              done (< (length rows) size))
+        (cl-incf org-glean--provider-work-count (length rows))
+        (dolist (item rows)
+          (when (or (not (file-exists-p (alist-get :path item)))
+                    (not (equal (alist-get :digest item)
+                                (org-glean--digest (alist-get :path item)))))
+            (setq org-glean--provider-stale-seen t))
+          (unless (gethash (alist-get :key item) seen)
+            (when (and (org-glean--eligible-p item filters)
+                       (cl-some (lambda (alias) (equal needle (downcase alias)))
+                                (org-glean--parse-aliases
+                                 (org-glean--property-value (alist-get :properties item) "ALIASES"))))
+              (if (>= (length items) limit)
+                  (setq extra t)
+                (puthash (alist-get :key item) t seen)
+                (setf (alist-get :match-type item) 'exact)
                 (push item items)))))))
     (list (nreverse items) examined
           (and (not done) (not extra) (>= examined budget)
@@ -544,6 +599,27 @@ then merged by target and ranked by weighted reciprocal-rank fusion (see
               (push 'exact used))
           (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                   (push (cons 'exact (error-message-string err)) provider-errors)))))
+    ;; A file's ALIASES is one more exact-match surface (capture-workflow
+    ;; note §7.1), e.g. "OD DMS" finding aistore, which never appears in
+    ;; its title. Kept as its own query/candidate pool, pushed under the
+    ;; same 'exact mode key so it ranks and reports exactly like a title
+    ;; match: `org-glean--fusion-merge' merges same-key entries fine (see
+    ;; its own contract), and an agent reading `match-reason' should not
+    ;; need to know whether "exact" meant title or alias.
+    (when (and (memq 'exact modes) (stringp query) (not (string-empty-p (string-trim query)))
+               (> remaining 0))
+      (let ((org-glean--provider-work-count 0))
+        (condition-case err
+            (let ((page (org-glean--collect-alias
+                        db query filters pool remaining page-size
+                        (make-hash-table :test #'equal))))
+              (push (cons 'exact (nth 0 page)) provider-lists)
+              (setq remaining (- remaining (nth 1 page))
+                    any-incomplete (or any-incomplete (nth 2 page))
+                    any-extra (or any-extra (nth 3 page)))
+              (push 'exact used))
+          (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
+                  (push (cons 'exact (error-message-string err)) provider-errors)))))
     (when (and (memq 'lexical modes) (> remaining 0))
       (let ((fts (org-glean--fts-pattern query)))
         (when fts
@@ -585,9 +661,13 @@ then merged by target and ranked by weighted reciprocal-rank fusion (see
            (truncated (or any-extra any-incomplete provider-errors has-extra)))
       (setq org-glean--last-search-completeness
             (cond ((or any-incomplete provider-errors) 'incomplete)
-                  ((or any-extra has-extra) 'truncated)
-                  (t 'complete))
-            org-glean--last-search-used (nreverse used)
+                   ((or any-extra has-extra) 'truncated)
+                   (t 'complete))
+            ;; delete-dups: the ALIASES lookup runs as its own candidate
+            ;; pool but is reported under the same 'exact mode key as the
+            ;; title lookup (see its call site above), so both can push
+            ;; 'exact independently when both ran.
+            org-glean--last-search-used (delete-dups (nreverse used))
             org-glean--last-search-provider-errors (nreverse provider-errors))
       (setq org-glean--last-search-examined (- budget remaining))
       (list results truncated stale))))

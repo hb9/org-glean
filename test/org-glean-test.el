@@ -1923,5 +1923,51 @@ it from its project's main file, found by the shared pr_<token>."
         (should (equal "preferred" (alist-get 'result (aref classifications 0))))
         (should (equal "eligible" (alist-get 'result (aref classifications 1))))))))
 
+(ert-deftest org-glean-test-alias-finds-file-by-exact-alias-not-title ()
+  "\"OD DMS\" never appears in aistore's title; ALIASES is how it is
+still found by an exact-style lookup (capture-workflow note §7.1)."
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--aistore__pr_aistore.org" root)
+     "#+property:   ALIASES aistore ai.store OD DMS\n\n* Some heading\n")
+    (org-glean-reconcile)
+    (let* ((response (org-glean-search-api "DMS" 5 nil nil '(exact)))
+           (results (alist-get 'results response)))
+      (should (= 1 (length results)))
+      (should (string-match-p "aistore" (alist-get :path (aref results 0)))))))
+
+(ert-deftest org-glean-test-alias-quoted-phrase-is-one-alias-not-split ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--tales__pr_tales.org" root)
+     "#+property:   ALIASES tales \"ai story\"\n\n* Some heading\n")
+    (org-glean-reconcile)
+    (let* ((hit (alist-get 'results (org-glean-search-api "ai story" 5 nil nil '(exact))))
+           (miss (alist-get 'results (org-glean-search-api "ai" 5 nil nil '(exact)))))
+      (should (= 1 (length hit)))
+      (should (= 0 (length miss))))))
+
+(ert-deftest org-glean-test-alias-match-is-case-insensitive ()
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--swg__pr_swg.org" root)
+     "#+property:   ALIASES SWG Stellwerk-Graph\n\n* Some heading\n")
+    (org-glean-reconcile)
+    (let ((results (alist-get 'results (org-glean-search-api "swg" 5 nil nil '(exact)))))
+      (should (= 1 (length results))))))
+
+(ert-deftest org-glean-test-alias-lookup-does-not-inflate-work-examined-when-unused ()
+  "The ALIASES pre-filter keeps this provider's cost proportional to
+actual ALIASES usage, not total corpus size: a corpus with no ALIASES
+anywhere must not have its own file-kind rows counted against the
+budget just because the alias provider ran."
+  (org-glean-test--corpus
+    (dotimes (n 20)
+      (org-glean-test--write (expand-file-name (format "%02d.org" n) root)
+                             (format "* Plain %d\nsomebody\n" n)))
+    (org-glean-reconcile)
+    (let ((response (org-glean-search-api "nomatch-at-all" 5 nil nil '(exact))))
+      (should (= 0 (alist-get 'work-examined response))))))
+
 (provide 'org-glean-test)
 ;;; org-glean-test.el ends here
