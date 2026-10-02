@@ -419,8 +419,11 @@ as validated defaults for now; re-run the eval before changing them.
       package as evidence infrastructure, not a product surface). Reusing
       `org-glean--property-value` reached into an internal API too. Now
       lives in that user's own Doom config instead
-      (`hb9/config-capture.el`), built only on `org-glean-outline` and
-      `org-glean-roots`, both already public. `ALIASES` search (below)
+      (`hb9/config-capture.el`), using only org-glean's public API
+      (`org-glean-outline`, `org-glean-roots`,
+      `org-glean-mcp-allowed-roots`) plus local copies of two small
+      internal helpers (root containment check, JSON normalization), so a
+      rename inside org-glean cannot silently break it. `ALIASES` search (below)
       stayed in org-glean because it generalized cleanly to a configurable
       property list; this did not generalize at all — every branch of its
       rule table was a specific convention, not a parameter.
