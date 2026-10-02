@@ -204,53 +204,5 @@ to any value."
                  (idempotentHint . t)
                  (openWorldHint . :false))))
 
-(defun org-glean-mcp--eligibility-handler (args)
-  "Handle MCP eligibility ARGS and return JSON per-file classification."
-  (condition-case err
-      (let* ((files (or (append (alist-get 'files args) nil)
-                        (and (alist-get 'file args) (list (alist-get 'file args)))))
-             (roots (or org-glean-mcp-allowed-roots
-                       (mapcar #'cadr org-glean-roots)))
-             (allowed nil) (denied nil))
-        (unless files (error "`file' or `files' is required"))
-        (unless roots (error "No Org Glean root is allowed for MCP eligibility"))
-        (dolist (file files)
-          (if (org-glean--path-in-roots-p file roots)
-              (push file allowed)
-            (push file denied)))
-        (let* ((result (org-glean-eligibility (nreverse allowed)))
-               (errors (append (alist-get :errors result)
-                               (mapcar (lambda (file)
-                                         `((:path . ,file)
-                                           (:message . "Path is outside every allowed root")))
-                                       (nreverse denied)))))
-          (json-encode (org-glean-mcp--json-normalize
-                        `((:classifications . ,(vconcat (alist-get :classifications result)))
-                          (:errors . ,(vconcat errors)))))))
-    (error (json-encode `((error . ,(error-message-string err)))))))
-
-(defconst org-glean-mcp--eligibility-input-schema
-  '((type . "object")
-    (properties . ((file . ((type . "string")
-                             (description . "Absolute path to one Org file")))
-                   (files . ((type . "array") (items . ((type . "string")))
-                             (description . "Absolute paths to several Org files, e.g. the top few candidate files from org-glean_search")))))
-    (required . []))
-  "MCP input schema for the read-only Org Glean eligibility tool.")
-
-(mcp-server-register-tool
- (make-mcp-server-tool
-   :name "org-glean_eligibility"
-  :title "Classify capture eligibility with Org Glean"
-  :description
-   "Classify one or more Org files as a capture destination: `preferred', `eligible' or `none', each with a short `reason'. Meant to run on the top few org-glean_search candidates before deciding where to place new material — a closed project's main note or a retired yearly task file can be a real, on-topic search hit while still being the wrong place to write to. The rule is read from each file's own KIND/STATUS/ROLE file-header properties (see org-knowledge's capture-workflow note), not from a standalone CAPTURE_POLICY value: KIND log/archive/inbox is always `none'; an active project's or area's own main file is `preferred'; a side file (ROLE side) inherits its status from its project's main file, found by the shared pr_<token> in the filename — this cross-file lookup, scoped to the same allowed root, is the one thing a single file's own properties cannot answer, and the reason this needs its own tool rather than being read directly off org-glean_outline. Everything else (knowledge/training/book, or no KIND at all) is `eligible'. When a side file's main file cannot be resolved or is ambiguous, it is conservatively treated as `eligible' rather than guessing, and the reason says so. Always reads fresh from disk into a throwaway buffer, exactly like org-glean_outline: no auto-id side effect, no unsaved-edit staleness, never writes anything. A path outside the allowed roots is reported as a per-file error, not silently dropped."
-   :input-schema org-glean-mcp--eligibility-input-schema
-  :function #'org-glean-mcp--eligibility-handler
-  :annotations '((readOnlyHint . t)
-                 (destructiveHint . :false)
-                 (idempotentHint . t)
-                 (openWorldHint . :false))))
-
-
 (provide 'org-glean-mcp)
 ;;; org-glean-mcp.el ends here

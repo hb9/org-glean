@@ -403,25 +403,21 @@ as validated defaults for now; re-run the eval before changing them.
       read, by construction incapable of writing anything. A path outside
       the       allowed roots, or a missing/unparseable file, is a per-file
       error, never a reason to fail every other requested file.
-- [x] **`org-glean_eligibility`** (new `org-glean-eligibility.el` + MCP
-      tool): classifies one or more files as `preferred`, `eligible` or
-      `none` as a capture destination, read from the KIND/STATUS/ROLE
-      file-header convention (org-knowledge's capture-workflow note
-      §6.3/§6.5/§7) rather than a standalone `CAPTURE_POLICY` value. This
-      reverses that note's original §6.5, which said the rule belonged in
-      the capture agent or an `orgk` helper, not in org-glean — written
-      before the agent became MCP-only with no shell access. The one
-      thing a single file's own properties cannot answer is a side file's
-      status (deliberately unset, per §7.3, inherited from its project's
-      main file): resolving that needs a cross-file lookup by the shared
-      `pr_<token>` in the filename, scoped to the same allowed root —
-      this is the one piece of real work the tool adds over what
-      `org-glean_outline` already returns per file. A side file whose
-      main file cannot be resolved, or resolves ambiguously (more than
-      one `ROLE main` sharing the token), is conservatively `eligible`
-      rather than guessed at either way, with the reason saying so. Reads
-       every file fresh from disk, same as `org-glean_outline`: no live
-       buffer, no auto-id side effect, never writes anything.
+- [x] ~~`org-glean_eligibility`~~ — built, then moved back out
+      (`org-glean-eligibility.el` removed; was org-glean commit `22b5eb4`).
+      It classified a file as `preferred`/`eligible`/`none` as a capture
+      destination, but that encoded one user's specific KIND/STATUS/ROLE
+      convention, Denote file-name shape, and `pr_<token>` project-grouping
+      scheme directly into org-glean — none of which a generic retrieval
+      package should know about (see `DESIGN.md`'s own framing of this
+      package as evidence infrastructure, not a product surface). Reusing
+      `org-glean--property-value` reached into an internal API too. Now
+      lives in that user's own Doom config instead
+      (`hb9/config-capture.el`), built only on `org-glean-outline` and
+      `org-glean-roots`, both already public. `ALIASES` search (below)
+      stayed in org-glean because it generalized cleanly to a configurable
+      property list; this did not generalize at all — every branch of its
+      rule table was a specific convention, not a parameter.
 - [x] **`ALIASES` searchable via `exact` mode** (`org-glean-search.el`):
       the same file-header convention's `ALIASES` property is now one more
       exact-match surface alongside title, so "OD DMS" finds aistore even
