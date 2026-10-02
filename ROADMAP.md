@@ -418,15 +418,24 @@ as validated defaults for now; re-run the eval before changing them.
       stayed in org-glean because it generalized cleanly to a configurable
       property list; this did not generalize at all — every branch of its
       rule table was a specific convention, not a parameter.
-- [x] **`ALIASES` searchable via `exact` mode** (`org-glean-search.el`):
-      the same file-header convention's `ALIASES` property is now one more
-      exact-match surface alongside title, so "OD DMS" finds aistore even
-      though neither word appears in its title. Its own bounded candidate
-      pool, reported under the same `exact` mode key as the title lookup
-      (`org-glean--fusion-merge` already supports several pools
-      contributing to one mode). Pre-filtered in SQL to files whose
-      properties mention `ALIASES` at all, so cost stays proportional to
-      actual usage rather than scanning every file on every search.
+- [x] **Configurable alias-property search via `exact` mode**
+      (`org-glean-search.el`): a new `org-glean-alias-properties` option
+      (empty by default) names file-level properties `exact` mode also
+      checks alongside title, e.g. a file whose configured property
+      includes "OD DMS" is found by that query even though neither word
+      appears in its title. Started as a hard-coded `ALIASES` property
+      name; made a setting instead once the eligibility tool it shipped
+      alongside turned out to need moving out of org-glean entirely (see
+      above) — the matching mechanism generalized cleanly (any property
+      name(s) a caller configures), unlike the eligibility rule, where
+      every branch was a specific convention rather than a parameter. Its
+      own bounded candidate pool, reported under the same `exact` mode key
+      as the title lookup (`org-glean--fusion-merge` already supports
+      several pools contributing to one mode). Pre-filtered in SQL to
+      files whose properties mention at least one configured name at all,
+      so cost stays proportional to actual usage rather than scanning
+      every file on every search, and is exactly zero when the option is
+      left at its empty default.
 
 
 - `org-glean_similar` ("notes like this one") remains a plausible future

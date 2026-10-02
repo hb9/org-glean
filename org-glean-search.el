@@ -278,26 +278,34 @@ each a separate alias, while \"tales \\\"ai story\\\"\" -> (\"tales\"
        (ignore-errors (split-string-and-unquote value))))
 
 (defun org-glean--collect-alias (db query filters limit budget page-size seen)
-  "Collect file-level targets whose ALIASES property has QUERY as one
-alias, exactly (case-insensitively), not a substring. A file's ALIASES
-are a first-draft convenience for exact lookups like \"OD DMS\" finding
-aistore (capture-workflow note §7.1); this is not fuzzy or partial
-matching — see `org-glean--collect-fuzzy' for that."
+  "Collect file-level targets whose configured alias properties have
+QUERY as one alias, exactly (case-insensitively), not a substring.
+Which properties count as alias lists is read from
+`org-glean-alias-properties', not hard-coded here — org-glean has no
+built-in idea of what an alias is, any more than it has one of what
+CAPTURE_POLICY means; a caller with no such convention configured gets
+no rows and no cost at all, handled by the caller before this is ever
+invoked (see its call site). This is not fuzzy or partial matching —
+see `org-glean--collect-fuzzy' for that."
   (let* ((needle (downcase (string-trim query)))
-         ;; properties LIKE '%ALIASES%' is a cheap pre-filter, not the
-         ;; match itself: it only narrows to files whose header sets
-         ;; ALIASES at all (a handful in practice, out of the whole
-         ;; corpus), before the real per-alias comparison below. Without
-         ;; it this would scan every file-kind row on every search,
-         ;; inflating `work-examined' in proportion to total corpus size
-         ;; rather than actual ALIASES usage.
-         (sql "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE kind='file' AND properties LIKE '%ALIASES%' ORDER BY path LIMIT ? OFFSET ?")
+         (properties org-glean-alias-properties)
+         ;; A LIKE pre-filter per configured property name is cheap, not
+         ;; the match itself: it only narrows to files whose header
+         ;; mentions at least one configured alias-property name at all
+         ;; (expected to be a handful of files, out of the whole corpus),
+         ;; before the real per-alias comparison below. Without it this
+         ;; would scan every file-kind row on every search, inflating
+         ;; `work-examined' in proportion to total corpus size rather
+         ;; than actual alias-property usage.
+         (like-clause (mapconcat (lambda (_) "properties LIKE ?") properties " OR "))
+         (like-params (mapcar (lambda (name) (concat "%" name "%")) properties))
+         (sql (format "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE kind='file' AND (%s) ORDER BY path LIMIT ? OFFSET ?" like-clause))
          (offset 0) (examined 0) (done nil) (items nil) (extra nil))
     (while (and (not done) (< examined budget) (not extra)
                 (< (length items) (1+ limit)))
       (let* ((size (min page-size (- budget examined)))
              (rows (org-glean--results
-                    (sqlite-select db sql (vector size offset)))))
+                    (sqlite-select db sql (vconcat like-params (vector size offset))))))
         (setq examined (+ examined (length rows))
               offset (+ offset (length rows))
               done (< (length rows) size))
@@ -309,9 +317,12 @@ matching — see `org-glean--collect-fuzzy' for that."
             (setq org-glean--provider-stale-seen t))
           (unless (gethash (alist-get :key item) seen)
             (when (and (org-glean--eligible-p item filters)
-                       (cl-some (lambda (alias) (equal needle (downcase alias)))
-                                (org-glean--parse-aliases
-                                 (org-glean--property-value (alist-get :properties item) "ALIASES"))))
+                       (cl-some
+                        (lambda (name)
+                          (cl-some (lambda (alias) (equal needle (downcase alias)))
+                                   (org-glean--parse-aliases
+                                    (org-glean--property-value (alist-get :properties item) name))))
+                        properties))
               (if (>= (length items) limit)
                   (setq extra t)
                 (puthash (alist-get :key item) t seen)
@@ -599,14 +610,18 @@ then merged by target and ranked by weighted reciprocal-rank fusion (see
               (push 'exact used))
           (error (setq remaining (max 0 (- remaining org-glean--provider-work-count)))
                   (push (cons 'exact (error-message-string err)) provider-errors)))))
-    ;; A file's ALIASES is one more exact-match surface (capture-workflow
-    ;; note §7.1), e.g. "OD DMS" finding aistore, which never appears in
-    ;; its title. Kept as its own query/candidate pool, pushed under the
-    ;; same 'exact mode key so it ranks and reports exactly like a title
-    ;; match: `org-glean--fusion-merge' merges same-key entries fine (see
-    ;; its own contract), and an agent reading `match-reason' should not
-    ;; need to know whether "exact" meant title or alias.
-    (when (and (memq 'exact modes) (stringp query) (not (string-empty-p (string-trim query)))
+    ;; A configured alias property (org-glean-alias-properties, empty by
+    ;; default) is one more exact-match surface, e.g. a file whose ALIASES
+    ;; property includes "OD DMS" is found by that query even though it
+    ;; never appears in its title. Kept as its own query/candidate pool,
+    ;; pushed under the same 'exact mode key so it ranks and reports
+    ;; exactly like a title match: `org-glean--fusion-merge' merges
+    ;; same-key entries fine (see its own contract), and an agent reading
+    ;; `match-reason' should not need to know whether "exact" meant title
+    ;; or alias. Skipped entirely, no query issued, when no alias property
+    ;; is configured — org-glean has no opinion on what an alias is.
+    (when (and org-glean-alias-properties
+               (memq 'exact modes) (stringp query) (not (string-empty-p (string-trim query)))
                (> remaining 0))
       (let ((org-glean--provider-work-count 0))
         (condition-case err

@@ -51,6 +51,27 @@ An empty INCLUDES list accepts every .org file."
   :type 'integer
   :group 'org-glean)
 
+(defcustom org-glean-alias-properties nil
+  "File-level property names `exact' mode also checks as alias lists.
+Empty by default: out of the box, org-glean does no alias search at
+all, and only compares a target's title, since no property name is
+privileged by this generic package. A caller with its own file-header
+convention for declaring alternate names (for example a single
+ALIASES property, or several differently-named ones) sets this to the
+property name(s) it uses, e.g. `(\"ALIASES\")'.
+
+Each named property's value is parsed with `split-string-and-unquote':
+space-separated, except a double-quoted run counts as one alias, e.g.
+\"aistore ai.store OD DMS\" is four separate aliases, while
+\"tales \\\"ai story\\\"\" keeps the quoted phrase as one. A query
+matching any one of them, on any configured property, exactly
+\(case-insensitively, never a substring) is reported as an `exact'
+match alongside a title match, via its own bounded candidate pool pre-
+filtered to files whose properties mention at least one configured
+name — see `org-glean--collect-alias'."
+  :type '(repeat string)
+  :group 'org-glean)
+
 (defcustom org-glean-semantic-provider nil
   "Optional function implementing semantic candidate retrieval.
 The function is called with QUERY, FILTERS and LIMIT, and must return a list

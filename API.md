@@ -284,20 +284,25 @@ shorthand for adding `fuzzy`.
 
 `exact` checks two things, both reported under the same `exact` mode in
 a result's `:modes`: a file-level or heading-level target's own title,
-and — new, file-level only — a file's `ALIASES` property (the
-KIND/STATUS/ROLE/ALIASES convention, capture-workflow note §7.1), split
-on whitespace except for a double-quoted run, which counts as one alias
-(`split-string-and-unquote`): `ALIASES aistore ai.store OD DMS` makes
-"OD" and "DMS" each a separate exact-match alias for that file, even
-though neither appears anywhere in its title, while `ALIASES tales "ai
-story"` keeps the quoted phrase as one alias rather than splitting it
-into "ai" and "story". Matching is exact and case-insensitive, never a
-substring or fuzzy match — that is what `fuzzy` mode is for. This is
-file-level only: a heading itself has no `ALIASES` of its own. The
-candidate pool is pre-filtered in SQL to files whose `properties` blob
-mentions `ALIASES` at all, so this stays proportional to actual
-`ALIASES` usage (a handful of files in practice) rather than scanning
-every file-level target on every search.
+and — file-level only — any property named in `org-glean-alias-
+properties` (empty by default: org-glean has no built-in idea of what
+an alias is, any more than it has one of what `CAPTURE_POLICY` means,
+so out of the box this adds nothing). A caller with its own file-header
+convention for declaring alternate names configures the property
+name(s) it uses, e.g. `(setq org-glean-alias-properties '("ALIASES"))`.
+Each configured property's value is split on whitespace except for a
+double-quoted run, which counts as one alias (`split-string-and-
+unquote`): `ALIASES aistore ai.store OD DMS` makes "OD" and "DMS" each
+a separate exact-match alias for that file, even though neither
+appears anywhere in its title, while `ALIASES tales "ai story"` keeps
+the quoted phrase as one alias rather than splitting it into "ai" and
+"story". Matching is exact and case-insensitive, never a substring or
+fuzzy match — that is what `fuzzy` mode is for. This is file-level
+only: a heading itself has no alias property of its own. The candidate
+pool is pre-filtered in SQL to files whose `properties` blob mentions
+at least one configured property name at all, so this stays
+proportional to actual usage (expected to be a handful of files) rather
+than scanning every file-level target on every search.
 
 `org-glean-search-api` accepts these filter plist keys:
 

@@ -1772,15 +1772,30 @@ still be reported."
       (org-glean-semantic-toggle)
       (should (timerp org-glean--semantic-queue-timer)))))
 
-(ert-deftest org-glean-test-alias-finds-file-by-exact-alias-not-title ()
-  "\"OD DMS\" never appears in aistore's title; ALIASES is how it is
-still found by an exact-style lookup (capture-workflow note §7.1)."
+(ert-deftest org-glean-test-alias-search-is-off-by-default ()
+  "`org-glean-alias-properties' defaults to empty: out of the box
+org-glean has no opinion on what an alias is, and issues no alias
+query at all — a caller configures its own property name(s) first."
   (org-glean-test--corpus
     (org-glean-test--write
      (expand-file-name "20260101T000000--aistore__pr_aistore.org" root)
      "#+property:   ALIASES aistore ai.store OD DMS\n\n* Some heading\n")
     (org-glean-reconcile)
-    (let* ((response (org-glean-search-api "DMS" 5 nil nil '(exact)))
+    (let* ((org-glean-alias-properties nil)
+           (response (org-glean-search-api "DMS" 5 nil nil '(exact))))
+      (should (= 0 (length (alist-get 'results response))))
+      (should (= 0 (alist-get 'work-examined response))))))
+
+(ert-deftest org-glean-test-alias-finds-file-by-exact-alias-not-title ()
+  "\"OD DMS\" never appears in aistore's title; a configured alias
+property is how it is still found by an exact-style lookup."
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--aistore__pr_aistore.org" root)
+     "#+property:   ALIASES aistore ai.store OD DMS\n\n* Some heading\n")
+    (org-glean-reconcile)
+    (let* ((org-glean-alias-properties '("ALIASES"))
+           (response (org-glean-search-api "DMS" 5 nil nil '(exact)))
            (results (alist-get 'results response)))
       (should (= 1 (length results)))
       (should (string-match-p "aistore" (alist-get :path (aref results 0)))))))
@@ -1791,7 +1806,8 @@ still found by an exact-style lookup (capture-workflow note §7.1)."
      (expand-file-name "20260101T000000--tales__pr_tales.org" root)
      "#+property:   ALIASES tales \"ai story\"\n\n* Some heading\n")
     (org-glean-reconcile)
-    (let* ((hit (alist-get 'results (org-glean-search-api "ai story" 5 nil nil '(exact))))
+    (let* ((org-glean-alias-properties '("ALIASES"))
+           (hit (alist-get 'results (org-glean-search-api "ai story" 5 nil nil '(exact))))
            (miss (alist-get 'results (org-glean-search-api "ai" 5 nil nil '(exact)))))
       (should (= 1 (length hit)))
       (should (= 0 (length miss))))))
@@ -1802,20 +1818,38 @@ still found by an exact-style lookup (capture-workflow note §7.1)."
      (expand-file-name "20260101T000000--swg__pr_swg.org" root)
      "#+property:   ALIASES SWG Stellwerk-Graph\n\n* Some heading\n")
     (org-glean-reconcile)
-    (let ((results (alist-get 'results (org-glean-search-api "swg" 5 nil nil '(exact)))))
+    (let* ((org-glean-alias-properties '("ALIASES"))
+           (results (alist-get 'results (org-glean-search-api "swg" 5 nil nil '(exact)))))
       (should (= 1 (length results))))))
 
+(ert-deftest org-glean-test-alias-honors-several-configured-properties ()
+  "A caller may configure more than one property name as an alias list;
+each is checked independently."
+  (org-glean-test--corpus
+    (org-glean-test--write
+     (expand-file-name "20260101T000000--a.org" root)
+     "#+property:   NICKNAMES foo\n\n* Some heading\n")
+    (org-glean-test--write
+     (expand-file-name "20260101T000001--b.org" root)
+     "#+property:   ALIASES bar\n\n* Some heading\n")
+    (org-glean-reconcile)
+    (let* ((org-glean-alias-properties '("ALIASES" "NICKNAMES")))
+      (should (= 1 (length (alist-get 'results (org-glean-search-api "foo" 5 nil nil '(exact))))))
+      (should (= 1 (length (alist-get 'results (org-glean-search-api "bar" 5 nil nil '(exact)))))))))
+
 (ert-deftest org-glean-test-alias-lookup-does-not-inflate-work-examined-when-unused ()
-  "The ALIASES pre-filter keeps this provider's cost proportional to
-actual ALIASES usage, not total corpus size: a corpus with no ALIASES
-anywhere must not have its own file-kind rows counted against the
-budget just because the alias provider ran."
+  "The alias-property pre-filter keeps this provider's cost proportional
+to actual configured-property usage, not total corpus size: a corpus
+with no configured alias property anywhere must not have its own
+file-kind rows counted against the budget just because the alias
+provider ran."
   (org-glean-test--corpus
     (dotimes (n 20)
       (org-glean-test--write (expand-file-name (format "%02d.org" n) root)
                              (format "* Plain %d\nsomebody\n" n)))
     (org-glean-reconcile)
-    (let ((response (org-glean-search-api "nomatch-at-all" 5 nil nil '(exact))))
+    (let* ((org-glean-alias-properties '("ALIASES"))
+           (response (org-glean-search-api "nomatch-at-all" 5 nil nil '(exact))))
       (should (= 0 (alist-get 'work-examined response))))))
 
 (provide 'org-glean-test)
