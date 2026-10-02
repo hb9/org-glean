@@ -128,7 +128,6 @@ reported, never silently treated as applied.
  :position INTEGER
  :digest SHA256-STRING
  :snippet STRING
- :capture-policy STRING
  :level INTEGER
  :outline-path STRING-LIST
  :properties PROPERTY-ALIST
@@ -315,25 +314,23 @@ than scanning every file-level target on every search.
 
 `:property-filters` constrains on any inherited Org property (a heading's
 own property drawer, or a file-level `#+PROPERTY` line it inherits from) —
-this mechanism has no built-in knowledge of any particular property name,
-`CAPTURE_POLICY` included. Every entry must match (they are ANDed
-together). `OP` is one of `equals`, `not-equals`, `in`, `not-in`,
-`exists`, `missing`; `:value` is used by `equals`/`not-equals`, `:values`
-by `in`/`not-in`. A property that was never set anywhere on a target is
-simply absent — it satisfies `not-equals`/`not-in`/`missing` and fails
-`equals`/`in`/`exists`, with no implicit default value substituted for
-any property. This is why, for example, filtering out `CAPTURE_POLICY`
-values of `"none"` (`:property-filters ((:key "CAPTURE_POLICY" :op not-in
-:values ("none")))`) also keeps a target that never set the property at
-all: absent is not `"none"`.
+this mechanism has no built-in knowledge of any particular property name.
+Every entry must match (they are ANDed together). `OP` is one of
+`equals`, `not-equals`, `in`, `not-in`, `exists`, `missing`; `:value` is
+used by `equals`/`not-equals`, `:values` by `in`/`not-in`. A property that
+was never set anywhere on a target is simply absent — it satisfies
+`not-equals`/`not-in`/`missing` and fails `equals`/`in`/`exists`, with no
+implicit default value substituted for any property. This is why, for
+example, filtering out a custom `STATUS` property's `"closed"` values
+(`:property-filters ((:key "STATUS" :op not-in :values ("closed")))`)
+also keeps a target that never set the property at all: absent is not
+`"closed"`.
 
-`:exclude-property-values`, `:property-key`/`:property-value` and
-`:property-equals` are all still accepted (the first two are deprecated
-aliases translated into `:property-filters` entries automatically —
-`org-glean--normalize-filters` — specifically, `:exclude-property-values`
-becomes a `not-in` filter on `CAPTURE_POLICY`, since that was the only
-property it was ever able to constrain; `:property-equals` is a separate,
-still-current mechanism for several exact key/value requirements at once:
+`:property-key`/`:property-value` and `:property-equals` are both still
+accepted (the first is a deprecated alias translated into a
+`:property-filters` entry — `org-glean--normalize-filters`;
+`:property-equals` is a separate, still-current mechanism for several
+exact key/value requirements at once:
 `((PROPERTY . VALUE) ...)`, all required). New callers wanting anything
 other than plain equality on several properties at once should use
 `:property-filters` directly.

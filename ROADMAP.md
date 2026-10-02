@@ -384,7 +384,13 @@ as validated defaults for now; re-run the eval before changing them.
       (`org-glean--normalize-filters`) so every existing caller is
       unaffected. 10 new ERT tests cover each op, case-insensitivity,
       ANDing, the no-implicit-default property, and both deprecated
-      aliases end to end.
+      aliases end to end. **Later removed** (see the `capture_policy`
+      retirement entry below): `:exclude-property-values` and the
+      `:capture-policy` field it read were specific to the one property
+      this mechanism was built to replace in the first place, so once
+      that property's column was dropped, the shim had nothing left to
+      translate. `:property-key`/`:property-value` stayed, since they are
+      generic.
 - [x] **`org-glean_outline`** (new `org-glean-outline.el` + MCP tool):
       whole-file heading structure (level, title, TODO keyword, whether
       it is a done keyword, priority, tags, org-id, outline path,
@@ -436,6 +442,24 @@ as validated defaults for now; re-run the eval before changing them.
       so cost stays proportional to actual usage rather than scanning
       every file on every search, and is exactly zero when the option is
       left at its empty default.
+- [x] **`capture_policy` retired entirely** (`org-glean-store.el`,
+      `org-glean-project.el`, `org-glean-search.el`, `org-glean-ui.el`,
+      `org-glean-mcp.el`): the column, its projection from a file's
+      `CAPTURE_POLICY` property, its `:capture-policy` result field, every
+      SQL `SELECT` listing it, and the `:exclude-property-values`/
+      `exclude_property_values` deprecated filter key that existed only
+      to constrain it. This was the last property org-glean still had
+      hard-coded special knowledge of; `:property-filters` (above) had
+      already made it redundant for any caller willing to name the
+      property explicitly, this just finished the job. Schema migration
+      to version 5 drops the column from a pre-existing database
+      (`ALTER TABLE targets DROP COLUMN capture_policy`, condition-cased
+      since a database created by the current `CREATE TABLE` never had
+      it to begin with); a dedicated ERT test seeds a v4-shaped database
+      with real data, reopens it, and confirms the column is gone, the
+      version is 5, and the target's own data survived. `:property-key`/
+      `:property-value` and `:property-equals` are untouched: they were
+      already generic, never specific to this one property.
 
 
 - `org-glean_similar` ("notes like this one") remains a plausible future

@@ -105,7 +105,7 @@ themselves."
   "Return at most LIMIT targets whose title exactly matches TITLE."
   (org-glean--results
    (sqlite-select (org-glean--db)
-                   "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ?"
+                   "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ?"
                   (vector title (max 1 (min 100 (or limit 20)))))))
 
 (defun org-glean-search (query &optional limit fuzzy)
@@ -144,10 +144,8 @@ Org property drawer plus any inherited file-level #+PROPERTY lines,
 already merged by the projector — see `org-glean--properties' in
 org-glean-project.el). A property that was never set anywhere for this
 target is simply absent from this alist; there is no default-value
-fallback here for any property name, `CAPTURE_POLICY' included — any
-such interpretation is a caller's job, done by inspecting the dedicated
-`:capture-policy' result field, which is where the target's own default
-of \"eligible\" already lives (see the projector)."
+fallback here for any property name — interpreting absence is entirely
+a caller's job, org-glean has no opinion on what any property means."
   (when (eq properties :null) (setq properties nil))
   (cl-some (lambda (property)
              (let ((name (if (symbolp (car property))
@@ -164,8 +162,8 @@ is one of `equals', `not-equals', `in', `not-in', `exists', `missing'
 string comparison in this file. A property that is absent from
 PROPERTIES simply has no value: it satisfies `not-equals'/`not-in' and
 `missing', and fails `equals'/`in'/`exists' — there is no implicit
-default value for any property name, including `CAPTURE_POLICY'; that is
-what makes this mechanism generic rather than a hard-coded special case."
+default value for any property name; that is what makes this mechanism
+generic rather than a hard-coded special case."
   (let* ((key (plist-get filter :key))
          (op (plist-get filter :op))
          (actual (org-glean--property-lookup properties key)))
@@ -191,11 +189,12 @@ what makes this mechanism generic rather than a hard-coded special case."
   "Return non-nil if ITEM does not satisfy FILTERS.
 FILTERS' `:property-filters' is the general mechanism for constraining on
 any inherited property (see `org-glean--property-filters-match-p'); it
-has no special knowledge of any particular property name. `:exclude-
-property-values' and `:property-equals' remain accepted for callers who
-have not moved to `:property-filters' yet, but are deprecated — see
-`org-glean--eligible-p''s docstring for what they translate to. This
-file has no hard-coded property name anywhere else."
+has no special knowledge of any particular property name. `:property-
+equals' is a generic single key/value convenience the MCP layer builds
+from its `property_key'/`property_value' arguments; `:property-key'/
+`:property-value' directly on FILTERS are an older, deprecated way to
+ask for the same thing, translated by `org-glean--normalize-filters'.
+This file has no hard-coded property name anywhere else."
   (or (and (plist-get filters :max-heading-level)
            (equal (alist-get :kind item) "heading")
            (> (or (alist-get :level item) 0) (plist-get filters :max-heading-level)))
@@ -207,23 +206,15 @@ file has no hard-coded property name anywhere else."
             (alist-get :properties item) (plist-get filters :property-filters)))))
 
 (defun org-glean--normalize-filters (filters)
-  "Translate FILTERS' deprecated keys into `:property-filters' entries.
-
-`:exclude-property-values VALUES' translates to a `not-in' filter on
-`CAPTURE_POLICY' — the only property it was ever able to constrain — so
-existing callers of the Elisp API and the MCP `exclude_property_values'
-parameter keep working unchanged. `:property-key'/`:property-value'
-translate to a single `equals' filter on whatever property name the
-caller gave. New callers should use `:property-filters' directly instead
-of either; this is the one place any of the old names is still
+  "Translate FILTERS' deprecated `:property-key'/`:property-value' into a
+`:property-filters' entry: a single `equals' filter on whatever property
+name the caller gave. New callers should use `:property-filters'
+directly instead; this is the one place either old name is still
 mentioned, everywhere else in this file the filtering mechanism has no
 built-in knowledge of any particular property."
-  (let ((exclude-values (plist-get filters :exclude-property-values))
-        (property-key (plist-get filters :property-key))
+  (let ((property-key (plist-get filters :property-key))
         (property-value (plist-get filters :property-value))
         (extra nil))
-    (when exclude-values
-      (push (list :key "CAPTURE_POLICY" :op 'not-in :values exclude-values) extra))
     (when (and property-key property-value)
       (push (list :key property-key :op 'equals :value property-value) extra))
     (if extra
@@ -283,7 +274,7 @@ QUERY as one alias, exactly (case-insensitively), not a substring.
 Which properties count as alias lists is read from
 `org-glean-alias-properties', not hard-coded here — org-glean has no
 built-in idea of what an alias is, any more than it has one of what
-CAPTURE_POLICY means; a caller with no such convention configured gets
+any other property means; a caller with no such convention configured gets
 no rows and no cost at all, handled by the caller before this is ever
 invoked (see its call site). This is not fuzzy or partial matching —
 see `org-glean--collect-fuzzy' for that."
@@ -299,7 +290,7 @@ see `org-glean--collect-fuzzy' for that."
          ;; than actual alias-property usage.
          (like-clause (mapconcat (lambda (_) "properties LIKE ?") properties " OR "))
          (like-params (mapcar (lambda (name) (concat "%" name "%")) properties))
-         (sql (format "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE kind='file' AND (%s) ORDER BY path LIMIT ? OFFSET ?" like-clause))
+         (sql (format "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE kind='file' AND (%s) ORDER BY path LIMIT ? OFFSET ?" like-clause))
          (offset 0) (examined 0) (done nil) (items nil) (extra nil))
     (while (and (not done) (< examined budget) (not extra)
                 (< (length items) (1+ limit)))
@@ -349,7 +340,7 @@ see `org-glean--collect-fuzzy' for that."
          (trigrams (org-glean--trigrams needle))
          (where (mapconcat (lambda (_) "lower(title) LIKE ?") trigrams " OR "))
          (patterns (mapcar (lambda (gram) (concat "%" gram "%")) trigrams))
-         (sql (format "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE %s ORDER BY title,path,position LIMIT ? OFFSET ?" where))
+         (sql (format "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE %s ORDER BY title,path,position LIMIT ? OFFSET ?" where))
          (scan-cap (min budget org-glean-fuzzy-candidate-limit))
          (offset 0) (examined 0) (done nil) scored extra)
     (while (and (not done) (< examined scan-cap) (not extra))
@@ -465,7 +456,7 @@ provider's failure."
       (cl-loop for (target-key score . z) in ranked
                while (< (length items) cap)
                do (let ((rows (sqlite-select
-                               db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE key = ?"
+                               db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE key = ?"
                                (vector target-key))))
                     (when (= (length rows) 1)
                       (let ((item (car (org-glean--results rows))))
@@ -600,7 +591,7 @@ then merged by target and ranked by weighted reciprocal-rank fusion (see
       (let ((org-glean--provider-work-count 0))
         (condition-case err
             (let ((page (org-glean--collect-provider
-                        db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
+                        db "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE title=? ORDER BY path,position LIMIT ? OFFSET ?"
                         (vector query) filters pool remaining page-size
                         (make-hash-table :test #'equal))))
               (push (cons 'exact (nth 0 page)) provider-lists)
@@ -641,7 +632,7 @@ then merged by target and ranked by weighted reciprocal-rank fusion (see
           (let ((org-glean--provider-work-count 0))
             (condition-case err
                 (let ((page (org-glean--collect-provider
-                            db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.capture_policy,t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
+                            db "SELECT t.key,t.path,t.kind,t.title,t.org_id,t.position,t.digest,snippet(target_fts,1,'[',']','…',16),t.level,t.outline_path,t.properties FROM target_fts JOIN targets t ON t.rowid=target_fts.rowid WHERE target_fts MATCH ? ORDER BY bm25(target_fts),t.path,t.position LIMIT ? OFFSET ?"
                             (vector fts) filters pool remaining page-size
                             (make-hash-table :test #'equal))))
                   (push (cons 'lexical (nth 0 page)) provider-lists)

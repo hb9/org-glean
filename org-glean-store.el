@@ -40,9 +40,8 @@ semantic materialization; it never touches `targets' or `sources'."
     (condition-case err
         (progn
           (sqlite-execute db "CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, root TEXT NOT NULL, digest TEXT NOT NULL)")
-          (sqlite-execute db "CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, org_id TEXT, position INTEGER NOT NULL, digest TEXT NOT NULL, capture_policy TEXT NOT NULL DEFAULT 'eligible', level INTEGER NOT NULL DEFAULT 0, outline_path TEXT NOT NULL DEFAULT '', properties TEXT NOT NULL DEFAULT 'nil', FOREIGN KEY(path) REFERENCES sources(path))")
-          (dolist (migration '("ALTER TABLE targets ADD COLUMN capture_policy TEXT NOT NULL DEFAULT 'eligible'"
-                               "ALTER TABLE targets ADD COLUMN level INTEGER NOT NULL DEFAULT 0"
+          (sqlite-execute db "CREATE TABLE IF NOT EXISTS targets (key TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, org_id TEXT, position INTEGER NOT NULL, digest TEXT NOT NULL, level INTEGER NOT NULL DEFAULT 0, outline_path TEXT NOT NULL DEFAULT '', properties TEXT NOT NULL DEFAULT 'nil', FOREIGN KEY(path) REFERENCES sources(path))")
+          (dolist (migration '("ALTER TABLE targets ADD COLUMN level INTEGER NOT NULL DEFAULT 0"
                                "ALTER TABLE targets ADD COLUMN outline_path TEXT NOT NULL DEFAULT ''"
                                "ALTER TABLE targets ADD COLUMN properties TEXT NOT NULL DEFAULT 'nil'"))
             (condition-case nil (sqlite-execute db migration) (error nil)))
@@ -94,6 +93,20 @@ semantic materialization; it never touches `targets' or `sources'."
             ;; by a chunk rebuild).
             (org-glean--backfill-chunks db)
             (sqlite-execute db "PRAGMA user_version = 4"))
+          (when (< version 5)
+            ;; capture_policy was a single hard-coded property (CAPTURE_POLICY)
+            ;; baked into the schema for one caller's convention; replaced by
+            ;; the generic `:property-filters' mechanism, which has no
+            ;; column of its own — any property lives in `properties'
+            ;; instead. A fresh database's CREATE TABLE above never had this
+            ;; column to begin with, so the DROP only ever does anything for
+            ;; a database migrating up from an older version; ignore the
+            ;; "no such column" error on a fresh database rather than
+            ;; probing for the column's existence first.
+            (condition-case nil
+                (sqlite-execute db "ALTER TABLE targets DROP COLUMN capture_policy")
+              (error nil))
+            (sqlite-execute db "PRAGMA user_version = 5"))
           (sqlite-commit db)
           t)
       (error
@@ -110,13 +123,13 @@ used to exist), where stale rows under old keys would otherwise linger."
   (sqlite-execute db "DELETE FROM chunks")
   (let ((by-path (make-hash-table :test #'equal)))
     (dolist (row (sqlite-select
-                  db "SELECT key,path,kind,title,body,org_id,position,digest,capture_policy,level,outline_path,properties FROM targets ORDER BY path,position"))
+                  db "SELECT key,path,kind,title,body,org_id,position,digest,level,outline_path,properties FROM targets ORDER BY path,position"))
       (pcase-let ((`(,key ,path ,kind ,title ,body ,org-id ,position ,digest
-                     ,capture-policy ,level ,outline-path ,properties)
+                     ,level ,outline-path ,properties)
                    (append row nil)))
         (push (list :key key :path path :kind kind :title title :body body
                    :org-id org-id :position position :digest digest
-                   :capture-policy capture-policy :level level
+                   :level level
                    :outline-path (and outline-path (not (string-empty-p outline-path))
                                      (split-string outline-path "\x1f" t))
                    :properties (org-glean--parse-properties properties))
@@ -175,11 +188,10 @@ passage keeps its vector across this replacement."
         (sqlite-execute db "INSERT OR REPLACE INTO sources(path,root,digest) VALUES(?,?,?)"
                         (vector path root digest))
         (dolist (record records)
-          (sqlite-execute db "INSERT INTO targets(key,path,kind,title,body,org_id,position,digest,capture_policy,level,outline_path,properties) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+          (sqlite-execute db "INSERT INTO targets(key,path,kind,title,body,org_id,position,digest,level,outline_path,properties) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
                           (vector (plist-get record :key) path (plist-get record :kind)
                                   (plist-get record :title) (plist-get record :body)
                                   (plist-get record :org-id) (plist-get record :position) digest
-                                  (or (plist-get record :capture-policy) "eligible")
                                   (or (plist-get record :level) 0)
                                   (mapconcat #'identity (plist-get record :outline-path) "\x1f")
                                   (org-glean--sql-properties (plist-get record :properties)))))
@@ -207,7 +219,7 @@ passage keeps its vector across this replacement."
   (mapcar (lambda (row)
             (let ((item (cl-mapcar #'cons
                                    '(:key :path :kind :title :org-id :position :digest :snippet
-                                     :capture-policy :level :outline-path :properties)
+                                     :level :outline-path :properties)
                                    (append row nil))))
               (org-glean--decode-target item))) rows))
 
@@ -237,10 +249,6 @@ passage keeps its vector across this replacement."
     (if cell (setcdr cell value)
       (push (cons key value) alist))
     alist))
-
-(defun org-glean--select-columns ()
-  "Return the common target result columns for SQL queries."
-  "key,path,kind,title,org_id,position,digest,snippet,capture_policy,level,outline_path,properties")
 
 (provide 'org-glean-store)
 ;;; org-glean-store.el ends here

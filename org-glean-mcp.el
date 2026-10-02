@@ -42,7 +42,6 @@ to any value."
       (let* ((query (alist-get 'query args))
              (limit (alist-get 'limit args))
              (max-level (alist-get 'max_heading_level args))
-             (exclude-values (append (alist-get 'exclude_property_values args) nil))
              (exclude-titles (append (alist-get 'exclude_titles args) nil))
              (property-key (alist-get 'property_key args))
              (property-value (alist-get 'property_value args))
@@ -59,7 +58,6 @@ to any value."
               (roots (or org-glean-mcp-allowed-roots
                          (mapcar #'cadr org-glean-roots)))
               (filters (list :allowed-roots roots
-                             :exclude-property-values exclude-values
                             :property-equals (when (and property-key property-value)
                                                (list (cons property-key property-value)))
                             :property-filters property-filters
@@ -113,12 +111,12 @@ to any value."
                    (max_heading_level . ((type . "integer") (minimum . 1)))
                    (property_filters
                     . ((type . "array")
-                       (description . "Constrain results by any inherited Org property (file-level #+PROPERTY, or a heading's own property drawer) — this tool has no built-in knowledge of any particular property name, CAPTURE_POLICY included. Every entry must match (they are ANDed together). A property never set anywhere on a target is simply absent, not defaulted to any value: `equals'/`in'/`exists' fail on it, `not_equals'/`not_in'/`missing' pass.")
+                       (description . "Constrain results by any inherited Org property (file-level #+PROPERTY, or a heading's own property drawer) — this tool has no built-in knowledge of any particular property name, e.g. KIND or STATUS included. Every entry must match (they are ANDed together). A property never set anywhere on a target is simply absent, not defaulted to any value: `equals'/`in'/`exists' fail on it, `not_equals'/`not_in'/`missing' pass.")
                        (items
                         . ((type . "object")
                            (properties
                             . ((key . ((type . "string")
-                                       (description . "Property name, matched case-insensitively, e.g. \"CAPTURE_POLICY\"")))
+                                       (description . "Property name, matched case-insensitively, e.g. \"STATUS\"")))
                                (op . ((type . "string")
                                       (enum . ["equals" "not_equals" "in" "not_in" "exists" "missing"])))
                                (value . ((type . "string")
@@ -126,9 +124,6 @@ to any value."
                                (values . ((type . "array") (items . ((type . "string")))
                                           (description . "Required for in/not_in")))))
                            (required . ["key" "op"])))))
-                   (exclude_property_values . ((type . "array")
-                                               (items . ((type . "string")))
-                                               (description . "Deprecated: use property_filters with key CAPTURE_POLICY and op not_in instead. Kept working for existing callers.")))
                    (exclude_titles . ((type . "array")
                                       (items . ((type . "string")))))
                    (property_key . ((type . "string")
@@ -146,7 +141,7 @@ to any value."
    :name "org-glean_search"
   :title "Search Org with Org Glean"
   :description
-   "Search configured Org roots with bounded exact, lexical, fuzzy AND semantic (meaning-based) retrieval; semantic search is this tool's main reason to exist, not an afterthought — it finds a target with no shared words with the query (e.g. querying \"food\" finds a recipe that never uses that word). Pass `modes' to select which retrieval strategies run (any of \"exact\", \"lexical\", \"fuzzy\", \"semantic\"); omit it to get every mode the corpus currently supports, semantic included once a model is installed. `exact' also checks any property named in `org-glean-alias-properties' (empty by default — org-glean has no built-in idea of what an alias is, so this adds nothing until configured), e.g. a file whose configured property includes \"OD DMS\" is found by that query even though neither word appears in its title. Results from every requested mode are merged into one ranked list; each result's `match-reason' names its best-scoring mode(s) and, for a semantic contribution, a z-score (e.g. \"semantic #1 z5.8\") — roughly, how much better this match is than a typical candidate for this query, not an absolute similarity number. A query with no strong match anywhere in the corpus can legitimately return few or no results; that is a correct answer, not a sign to keep guessing at rephrasing it. `property_filters' constrains results by any inherited Org property this corpus happens to use (e.g. CAPTURE_POLICY, but nothing about this tool is specific to that one) — pass it explicitly whenever you want that constraint; nothing is filtered by property implicitly. `max_heading_level' caps heading depth; `exclude_titles' omits generic headings by name. Returns provisional or Org-ID targets with file, outline path, score, reason, source freshness, a location link, and completeness/truncation metadata. This tool never modifies Org files. Use org-get-node to resolve/read a target before capture, or org-glean_outline for a whole file's structure at once."
+   "Search configured Org roots with bounded exact, lexical, fuzzy AND semantic (meaning-based) retrieval; semantic search is this tool's main reason to exist, not an afterthought — it finds a target with no shared words with the query (e.g. querying \"food\" finds a recipe that never uses that word). Pass `modes' to select which retrieval strategies run (any of \"exact\", \"lexical\", \"fuzzy\", \"semantic\"); omit it to get every mode the corpus currently supports, semantic included once a model is installed. `exact' also checks any property named in `org-glean-alias-properties' (empty by default — org-glean has no built-in idea of what an alias is, so this adds nothing until configured), e.g. a file whose configured property includes \"OD DMS\" is found by that query even though neither word appears in its title. Results from every requested mode are merged into one ranked list; each result's `match-reason' names its best-scoring mode(s) and, for a semantic contribution, a z-score (e.g. \"semantic #1 z5.8\") — roughly, how much better this match is than a typical candidate for this query, not an absolute similarity number. A query with no strong match anywhere in the corpus can legitimately return few or no results; that is a correct answer, not a sign to keep guessing at rephrasing it. `property_filters' constrains results by any inherited Org property this corpus happens to use (e.g. STATUS or KIND, but nothing about this tool is specific to any one of them) — pass it explicitly whenever you want that constraint; nothing is filtered by property implicitly. `max_heading_level' caps heading depth; `exclude_titles' omits generic headings by name. Returns provisional or Org-ID targets with file, outline path, score, reason, source freshness, a location link, and completeness/truncation metadata. This tool never modifies Org files. Use org-get-node to resolve/read a target before capture, or org-glean_outline for a whole file's structure at once."
    :input-schema org-glean-mcp--input-schema
   :function #'org-glean-mcp--handler
   :annotations '((readOnlyHint . t)

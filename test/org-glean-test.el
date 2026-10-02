@@ -261,10 +261,42 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
       ;; stored targets.
       (let* ((db (org-glean--db))
              (chunks (sqlite-select db "SELECT key,target_key,text FROM chunks ORDER BY key")))
-        (should (= 4 (caar (sqlite-select db "PRAGMA user_version"))))
+        (should (= 5 (caar (sqlite-select db "PRAGMA user_version"))))
         (should (= 2 (length chunks))) ; file record + one heading
         (should (cl-some (lambda (row) (string-search "Existing heading" (nth 2 row))) chunks))
         (should (cl-some (lambda (row) (string-search "existing body" (nth 2 row))) chunks))))))
+
+(ert-deftest org-glean-test-migration-drops-capture-policy-column ()
+  "A database at schema version 4 (capture_policy column present, carrying
+real data from before it was retired) must migrate to version 5 with the
+column gone, and must not lose any of its other target data in the
+process."
+  (org-glean-test--corpus
+    (org-glean-test--write (expand-file-name "note.org" root)
+                           "#+title: Old Corpus\n* Existing heading\nexisting body\n")
+    (org-glean-reconcile)
+    (let ((db (org-glean--db)))
+      ;; Simulate a database that still has the retired column: add it back
+      ;; (a fresh database created by this test run never had it to begin
+      ;; with, since the current CREATE TABLE omits it) and roll the schema
+      ;; version back to 4, exactly as a database from before this column
+      ;; was dropped would look.
+      (sqlite-execute db "ALTER TABLE targets ADD COLUMN capture_policy TEXT NOT NULL DEFAULT 'eligible'")
+      (sqlite-execute db "PRAGMA user_version = 4")
+      (should (member "capture_policy"
+                      (mapcar (lambda (row) (nth 1 row))
+                              (sqlite-select db "PRAGMA table_info(targets)"))))
+      (org-glean-close)
+      (setq org-glean--database nil))
+    ;; Reopening (no file changes, no reconcile) must trigger the v4->v5
+    ;; migration: the column is gone, the schema version is 5, and the
+    ;; target's own data survived the migration intact.
+    (let* ((db (org-glean--db))
+           (columns (mapcar (lambda (row) (nth 1 row))
+                            (sqlite-select db "PRAGMA table_info(targets)"))))
+      (should (= 5 (caar (sqlite-select db "PRAGMA user_version"))))
+      (should-not (member "capture_policy" columns))
+      (should (= 1 (length (org-glean-search "existing heading")))))))
 
 
 (ert-deftest org-glean-test-chunk-windows-splits-long-body-with-overlap ()
@@ -556,10 +588,9 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
 
 (ert-deftest org-glean-test-property-filters-has-no-implicit-default-value ()
   ;; The generic mechanism has no built-in knowledge of any property,
-  ;; CAPTURE_POLICY included: a property that was never set anywhere for a
-  ;; target is simply absent, never silently treated as some default value.
-  ;; This is what distinguishes it from the deprecated :exclude-property-
-  ;; values path this same case is compared against below.
+  ;; CAPTURE_POLICY used here purely as an arbitrary example name: a
+  ;; property that was never set anywhere for a target is simply absent,
+  ;; never silently treated as some default value.
   (org-glean-test--corpus
     (org-glean-test--write (expand-file-name "note.org" root)
                            "* Undecorated\nnodefaulttermbare\n")
@@ -593,22 +624,6 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
              (results (alist-get 'results response)))
         (should (= 1 (length results)))
         (should (equal "Eligible destination" (alist-get :title (aref results 0))))))))
-
-(ert-deftest org-glean-test-deprecated-exclude-property-values-still-works ()
-  ;; Regression test for the backward-compatibility shim
-  ;; (org-glean--normalize-filters): existing callers passing
-  ;; :exclude-property-values directly (not through MCP) must see identical
-  ;; behavior to before property_filters existed.
-  (org-glean-test--corpus
-    (org-glean-test--write
-     (expand-file-name "note.org" root)
-     "#+PROPERTY: CAPTURE_POLICY none\n* Hidden\nlegacyexcludeterm\n")
-    (org-glean-test--write (expand-file-name "z.org" root) "* Visible\nlegacyexcludeterm\n")
-    (org-glean-reconcile)
-    (should (= 1 (alist-get 'candidate-count
-                            (org-glean-search-api
-                             "legacyexcludeterm" 10 nil
-                             '(:exclude-property-values ("none"))))))))
 
 (ert-deftest org-glean-test-deprecated-property-key-value-still-works ()
   (org-glean-test--corpus
@@ -732,7 +747,7 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
                                (org-glean--alist-put :score 91 item)))
                             (org-glean--results
                              (sqlite-select (org-glean--db)
-                                            "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE kind='heading' ORDER BY path"))))
+                                            "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE kind='heading' ORDER BY path"))))
              (a (car items))
              (b (cadr items))
              (key-b (alist-get :key b))
@@ -928,7 +943,6 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
              (results (alist-get 'results response)))
         (should (= 1 (length results)))
         (should (eq 'sources-checked-current (alist-get 'freshness response)))
-        (should (equal "eligible" (alist-get :capture-policy (aref results 0))))
         (let ((none (org-glean-search-api "newterm" 10 nil
                                           '(:property-equals (("PROJECT" . "red"))))))
           (should (= 0 (alist-get 'candidate-count none))))))))
@@ -1116,7 +1130,8 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
     (let ((org-glean-search-page-size 20))
       (org-glean-reconcile)
       (let* ((response (org-glean-search-api
-                        "sharedneedle" 1 nil '(:exclude-property-values ("none"))))
+                        "sharedneedle" 1 nil
+                        '(:property-filters ((:key "CAPTURE_POLICY" :op not-in :values ("none"))))))
              (results (alist-get 'results response)))
         (should (= 1 (length results)))
         (should (equal "Eligible destination" (alist-get :title (aref results 0))))
@@ -1148,7 +1163,8 @@ embedder inside org_glean_embed.py, selected by ORG_GLEAN_FAKE_EMBED."
     (org-glean-reconcile)
     (let* ((org-glean-search-work-budget 5)
            (response (org-glean-search-api
-                      "rareprobe" 2 nil '(:exclude-property-values ("none")))))
+                      "rareprobe" 2 nil
+                      '(:property-filters ((:key "CAPTURE_POLICY" :op not-in :values ("none")))))))
       (should (= 0 (alist-get 'candidate-count response)))
       (should (eq 'incomplete (alist-get 'completeness response)))
       (should (eq t (alist-get 'truncated response)))

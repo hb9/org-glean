@@ -68,12 +68,6 @@
                       (org-element-property :value property))))))))
     properties))
 
-(defun org-glean--capture-policy (headline inherited)
-  "Return HEADLINE's inherited CAPTURE_POLICY, overriding INHERITED."
-  (let ((local (org-glean--property-value
-                (org-glean--properties headline nil) "CAPTURE_POLICY")))
-    (or local inherited "eligible")))
-
 (defun org-glean--property-value (properties key)
   "Return KEY's value from generic PROPERTIES, handling string/symbol keys."
   (cdr (cl-find key properties
@@ -93,13 +87,6 @@
                           (when (string= (org-element-property :key kw) "TITLE")
                             (org-element-property :value kw))) nil t)
                       (file-name-base path)))
-           (file-policy (or (org-element-map tree 'keyword
-                              (lambda (kw)
-                                (when (and (equal "PROPERTY" (org-element-property :key kw))
-                                           (string-match "\\`CAPTURE_POLICY[ \t]+\\(none\\|preferred\\|eligible\\)\\b"
-                                                         (org-element-property :value kw)))
-                                  (match-string 1 (org-element-property :value kw)))) nil t)
-                             "eligible"))
            (file-properties (org-element-map tree 'keyword
                              (lambda (kw)
                                (when (and (equal "PROPERTY" (org-element-property :key kw))
@@ -111,7 +98,7 @@
            (records (list (list :key (concat path "#file") :kind "file"
                                 :title title :body (or (org-glean--paragraphs
                                                        (org-glean--section tree)) "")
-                                 :capture-policy file-policy :level 0 :outline-path nil
+                                 :level 0 :outline-path nil
                                  :properties (org-glean--properties nil file-properties)
                                 :position 1)))
            (ordinal 0))
@@ -123,8 +110,6 @@
                       :kind "heading" :title (org-element-property :raw-value h)
                       :body (or (org-glean--paragraphs (org-glean--section h)) "")
                       :org-id (org-glean--heading-id h)
-                      :capture-policy (or (org-glean--property-value properties "CAPTURE_POLICY")
-                                           file-policy)
                       :level (org-element-property :level h)
                       :outline-path (let ((parent (org-element-property :parent h)) path-parts)
                                       (while (and parent (eq (org-element-type parent) 'headline))

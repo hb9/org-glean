@@ -22,7 +22,7 @@
          (id (alist-get :org-id result)))
     (when id
       (let ((matches (sqlite-select db
-                                    "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),capture_policy,level,outline_path,properties FROM targets WHERE org_id=? LIMIT 2"
+                                    "SELECT key,path,kind,title,org_id,position,digest,substr(body,1,160),level,outline_path,properties FROM targets WHERE org_id=? LIMIT 2"
                                     (vector id))))
         (cond
          ((> (length matches) 1)
